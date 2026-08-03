@@ -148,8 +148,21 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
             raise HarnessError("node %s (%s) failed: %s"
                                % (node["host"], mdl, e), meta)
         meta["turns"] += 1
-        meta["eval_count"] += body.get("eval_count") or 0
-        meta["prompt_eval_count"] += body.get("prompt_eval_count") or 0
+        # Token accounting from either body shape (Ollama-native counters, or
+        # OpenAI-compatible `usage` from LM Studio / model_shim backends).
+        usage = body.get("usage") or {}
+        meta["eval_count"] += (body.get("eval_count")
+                               or usage.get("completion_tokens") or 0)
+        meta["prompt_eval_count"] += (body.get("prompt_eval_count")
+                                      or usage.get("prompt_tokens") or 0)
+        # Preserve transport evidence (seam agreement with dogma-2,
+        # cc-handoff 2026-08-03T011239Z): residency/attribution/provider
+        # details feed promotion decisions and must survive the decoder.
+        # Fixed key set (bounded), last turn wins.
+        for k in ("backend", "resident", "attributed", "latency_s",
+                  "error", "provider_error"):
+            if k in body:
+                meta.setdefault("transport", {})[k] = body[k]
 
         decoded = dialects.decode(body)
         if not decoded.calls:
@@ -157,7 +170,9 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
             return decoded.text, meta
 
         # Record the assistant turn as the model produced it, then execute.
-        messages.append(body.get("message")
+        # Tool calls in one reply run SEQUENTIALLY, in reply order; each
+        # result message follows in the same order (seam contract §3).
+        messages.append(dialects.message_of(body)
                         or {"role": "assistant", "content": decoded.text})
         for call in decoded.calls:
             name, args = call["name"], call["args"]
@@ -176,7 +191,8 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
                 except Exception as e:  # noqa: BLE001 — fed back, not fatal
                     result = "ERROR: %s: %s" % (type(e).__name__, e)
                     meta["tool_calls"].append((name, "error"))
-            messages.append(dialects.tool_result_message(name, result, dia))
+            messages.append(dialects.tool_result_message(
+                name, result, dia, call_id=call.get("id")))
 
     meta["wall_s"] = time.monotonic() - t0
     raise HarnessError("turn budget %d exhausted without a final answer"

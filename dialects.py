@@ -92,6 +92,7 @@ def _normalize_call(obj):
     """
     if not isinstance(obj, dict):
         return None
+    call_id = obj.get("id")  # OpenAI-compatible shapes carry it on the outer dict
     if "function" in obj and isinstance(obj["function"], dict):
         obj = obj["function"]
     name = obj.get("name")
@@ -111,10 +112,28 @@ def _normalize_call(obj):
         args = {}
     if not isinstance(args, dict):
         return None
-    return {"name": name, "args": args}
+    call = {"name": name, "args": args}
+    if call_id:
+        call["id"] = call_id
+    return call
 
 
 # ------------------------------------------------------------------- decode ---
+def message_of(body):
+    """Lift the assistant message from an Ollama-native OR OpenAI-compatible
+    body (LM Studio / model_shim backends return ``choices[0].message``).
+
+    Seam agreement with dogma-2 (cc-handoff 2026-08-03T011239Z): a transport
+    may return either shape; the decoder normalizes, the loop never branches.
+    """
+    if "choices" in body:
+        choices = body.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            return choices[0].get("message") or {}
+        return {}
+    return body.get("message") or {}
+
+
 def strip_think(content):
     """Remove <think>…</think> spans; an unclosed leading <think> is all CoT."""
     if not content:
@@ -131,7 +150,7 @@ def decode(body):
     ``calls == []`` means the model gave a final answer. Applied identically to
     every dialect — see the module docstring for why.
     """
-    msg = body.get("message") or {}
+    msg = message_of(body)
     thinking = msg.get("thinking") or ""
     content = strip_think(msg.get("content") or "")
 
@@ -232,12 +251,19 @@ def encode(messages, tools, dialect):
     return out, None
 
 
-def tool_result_message(name, content, dialect):
-    """Encode one tool result as the message the model sees next turn."""
+def tool_result_message(name, content, dialect, call_id=None):
+    """Encode one tool result as the message the model sees next turn.
+
+    ``call_id`` (when the call carried one — OpenAI-compatible backends) is
+    echoed as ``tool_call_id`` so those backends can pair result to call.
+    """
     if dialect == "native":
         # role=tool is the native shape; tool_name is honoured by current
         # Ollama and harmlessly ignored by older templates.
-        return {"role": "tool", "tool_name": name, "content": content}
+        msg = {"role": "tool", "tool_name": name, "content": content}
+        if call_id:
+            msg["tool_call_id"] = call_id
+        return msg
     return {"role": "user",
             "content": "Tool result for %s:\n%s\n\nContinue the task. Call "
                        "another tool or give the final answer." % (name, content)}

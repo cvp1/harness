@@ -43,6 +43,13 @@
       "status": "assumed"
     },
     {
+      "match": "granite*",
+      "dialect": "native",
+      "options": {"think": false},
+      "status": "assumed",
+      "note": "dogma-2 suite chain PASS @32k 2026-08-03 (their shim/evaluator, not our probe — cc-handoff 011239Z reply)"
+    },
+    {
       "match": "deepseek-r1*",
       "dialect": "prompted",
       "options": {"think": false},

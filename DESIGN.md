@@ -1,8 +1,10 @@
 # harness — the fleet's own agentic loop + model translation layer
 
-**Status:** core BUILT + LIVE-VALIDATED 2026-08-02 (see §7). **Owner:** Craig.
-**Consumers-to-be:** the dogma-2 / gpt shims replacing hermes and opencode —
-§3 is the contract they target.
+**Status:** core BUILT + LIVE-VALIDATED 2026-08-02 (see §7); **seam CONVERGED
+with dogma-2 2026-08-03** (cc-handoff `2026-08-03T011239Z…-6876` reply — §3a).
+**Owner:** Craig. **Consumers:** the dogma-2 / gpt shims replacing hermes and
+opencode — §3 is the contract; dogma-2's `model_shim` adapts to it as an
+injectable transport.
 
 ## 1. Why we own this layer now
 
@@ -65,6 +67,32 @@ run_agentic(task, workdir, *, timeout=600, model=None, max_turns=12,
 * CLI: `cd ~/Github/CC && python3 -m harness "task" --workdir DIR`
   (`--probe MODEL`, `--selftest`, `--dialect`, `--no-bash`, `--json`).
 
+### 3a. Seam convergence (agreed with dogma-2, 2026-08-03)
+
+Division of labor, per their reply and accepted here:
+
+* **Ranch (this repo)** owns the agent loop, universal decode/repair, the
+  dialect registry, `Tool`, and the gate hook.
+* **dogma-2's `~/ai-os/tools/local-model/model_shim.py`** (Ollama-native +
+  LM Studio/OpenAI-compatible backends, one-turn transport, normalized
+  output) plugs in BEHIND this seam as an injectable transport — it is not a
+  second loop. Their host layer (residency attribution, memory preflight,
+  local safety policy) rides as injectable gate hooks, not dialect code.
+* **A transport may return either body shape** — Ollama-native
+  (`body.message`) or OpenAI-compatible (`body.choices[0].message`);
+  `dialects.message_of()` normalizes, the loop never branches. Usage is read
+  from Ollama counters or OpenAI `usage` equally.
+* **Transport evidence survives:** `backend` / `resident` / `attributed` /
+  `latency_s` / `error` / `provider_error` on a body are preserved into
+  `meta["transport"]` (fixed key set, last turn wins) — promotion evidence
+  is never discarded by the decoder. OpenAI-style call `id`s round-trip as
+  `tool_call_id` on the result message.
+* **Parallel tool calls:** normalized by decode, EXECUTED SEQUENTIALLY in
+  reply order; result messages follow in the same order. That is the
+  contract, not an implementation detail.
+* **Streaming stays out of the seam** until a consumer needs it (their
+  shim is one-complete-response-per-call; so is ours).
+
 ## 4. Bounds (Principle 8 — a bound REFUSES, it never narrates)
 
 | bound | mechanism |
@@ -117,9 +145,10 @@ reported to the model — never silent. A gate that *crashes* fails CLOSED.
 
 ## 8. Next (not in this build)
 
-* dogma-2 / gpt shims adopt §3; hermes' HA lane and `codex_local`'s floor
-  migrate behind `run_agentic` once the shims land and gate green.
-* Probe + registry rows for qwen/mistral/llama3 tags when next pulled
-  (`assumed` → `proven`).
+* dogma-2 adapts `model_shim.call_once` to the §3 transport interface (their
+  proposal, their side); hermes' HA lane and `codex_local`'s floor migrate
+  behind `run_agentic` once the shims land and gate green.
+* Probe + registry rows for qwen/mistral/llama3/granite tags when next pulled
+  (`assumed` → `proven`; granite carries dogma-2 suite evidence already).
 * `profile_gate.sh` / `mini_gate.py` grow a harness-native arm so model gating
   and production share one loop.

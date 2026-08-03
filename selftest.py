@@ -84,6 +84,18 @@ def test_decoder():
     # Final answer path.
     d = dialects.decode(body("All done: 3 lines."))
     ok(d.calls == [] and d.text.startswith("All done"), "plain final answer")
+    # OpenAI-compatible body (LM Studio / model_shim backend): choices[0],
+    # outer id, string arguments.
+    oai = {"choices": [{"message": {
+        "role": "assistant", "content": "",
+        "tool_calls": [{"id": "call_9", "type": "function",
+                        "function": {"name": "read_file",
+                                     "arguments": '{"path": "a.txt"}'}}]}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+    d = dialects.decode(oai)
+    ok(d.calls == [{"name": "read_file", "args": {"path": "a.txt"},
+                    "id": "call_9"}], "OpenAI-shape decode with call id")
+    ok(dialects.message_of({"choices": []}) == {}, "message_of empty choices safe")
 
 
 # ----------------------------------------------------------------- encoder ---
@@ -109,6 +121,10 @@ def test_encoder():
     ok(r["role"] == "tool" and r["tool_name"] == "mark", "native tool result shape")
     r = dialects.tool_result_message("mark", "done", "prompted")
     ok(r["role"] == "user" and "mark" in r["content"], "prompted tool result shape")
+    r = dialects.tool_result_message("mark", "done", "native", call_id="call_9")
+    ok(r["tool_call_id"] == "call_9", "native tool result echoes call id")
+    r = dialects.tool_result_message("mark", "done", "native")
+    ok("tool_call_id" not in r, "no phantom call id when none given")
 
 
 # ---------------------------------------------------------------- registry ---
@@ -215,6 +231,30 @@ def test_loop():
     loop.run("t", [big], model="m", transport=transport)
     ok("…[truncated 500 chars]" in sent[1]["messages"][-1]["content"],
        "loop: tool result truncated with marker")
+    # OpenAI-compatible transport end-to-end: usage counted, evidence kept,
+    # call id paired back on the result message.
+    oai_call = {"choices": [{"message": {
+        "role": "assistant", "content": "",
+        "tool_calls": [{"id": "call_1", "type": "function",
+                        "function": {"name": "echo",
+                                     "arguments": '{"text": "via-shim"}'}}]}}],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 7},
+        "backend": "lmstudio", "resident": True, "attributed": "exact",
+        "latency_s": 1.2}
+    oai_final = {"choices": [{"message": {"role": "assistant",
+                                          "content": "shim done"}}],
+                 "usage": {"prompt_tokens": 60, "completion_tokens": 4}}
+    transport, sent = _scripted_transport([oai_call, oai_final])
+    answer, meta = loop.run("t", [echo], model="m", transport=transport)
+    ok(answer == "shim done" and meta["eval_count"] == 11
+       and meta["prompt_eval_count"] == 100,
+       "loop: OpenAI-shape usage accounted")
+    ok(meta["transport"] == {"backend": "lmstudio", "resident": True,
+                             "attributed": "exact", "latency_s": 1.2},
+       "loop: transport evidence preserved in meta")
+    ok(sent[1]["messages"][-1].get("tool_call_id") == "call_1"
+       and sent[1]["messages"][-2].get("tool_calls"),
+       "loop: OpenAI call id paired, assistant turn recorded from choices")
 
 
 # ------------------------------------------------------------- tools_local ---
