@@ -1,0 +1,221 @@
+"""loop — the native agentic loop (stdlib-only). We ARE the harness.
+
+Until 2026-08-02 every agentic local turn in this fleet rented someone else's
+loop — hermes, Codex CLI, opencode, headless Claude — and every hard-won
+false negative in LOCAL_FLEET.md §4n/§4o was a harness-layer defect we could
+not fix because we did not own the layer. This module is that layer, owned:
+canonical messages in, ``dialects`` translating per model, tools executed
+here, bounded everywhere.
+
+Contract (the seam the dogma-2 / gpt shims target — keep it stable):
+
+    run(task, tools, model=None, ...)        -> (answer, meta)   # the loop
+    run_agentic(task, workdir, ...)          -> (answer, meta)   # the floor,
+        mirrors _lib/codex_local.run_agentic so the two are interchangeable
+
+Bounds (Principle 8 — a bound REFUSES, it never just narrates):
+  * ``max_turns``   — model calls per run; exceeding raises HarnessError.
+  * ``deadline``    — wall-clock budget checked before every model call.
+  * tool results    — truncated to MAX_RESULT_CHARS with an explicit marker.
+  * per-call        — transport timeout on every /api/chat POST.
+
+Enforcement seam: ``gate`` is a callable ``(tool_name, args) -> (bool, reason)``
+run OUTSIDE the model before every execution (the Progent pattern —
+_lib/policy_gate composes here). A denial is enforced (the tool does not run)
+and reported back to the model so it can adapt; it is never silent.
+"""
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _lib import local_llm  # noqa: E402 — one home for the .21 node fact
+
+try:
+    from . import dialects, registry
+except ImportError:  # run as a loose script rather than a package
+    import dialects, registry  # noqa: F401
+
+MAX_RESULT_CHARS = 8000       # cap on any single tool result fed back
+DEFAULT_MAX_TURNS = 12        # model calls per run
+DEFAULT_CALL_TIMEOUT = 180    # seconds per /api/chat POST (cold load ~20s)
+DEFAULT_WALL_BUDGET = 600     # seconds per run_agentic run, mirrors codex_local
+
+
+class HarnessError(RuntimeError):
+    """The loop refused: budget exhausted, no node, or an unusable model reply.
+
+    Carries ``meta`` (the run's telemetry so far) for the caller's post-mortem.
+    """
+
+    def __init__(self, message, meta=None):
+        super().__init__(message)
+        self.meta = meta or {}
+
+
+class Tool:
+    """One callable tool: name + description + JSON-schema params + fn(args)->str."""
+
+    def __init__(self, name, description, parameters, fn):
+        self.name = name
+        self.description = description
+        self.parameters = parameters or {"type": "object", "properties": {}}
+        self.fn = fn
+
+    def spec(self):
+        return {"name": self.name, "description": self.description,
+                "parameters": self.parameters}
+
+
+def _default_transport(host, payload, timeout):
+    """One non-streaming /api/chat POST. Kept tiny so tests inject a fake."""
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        "http://%s:%d/api/chat" % (host, local_llm.NODE_PORT), data=data,
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _truncate(text, cap=MAX_RESULT_CHARS):
+    if len(text) <= cap:
+        return text
+    return text[:cap] + "\n…[truncated %d chars]" % (len(text) - cap)
+
+
+def run(task, tools, *, model=None, system=None, dialect=None, options=None,
+        max_turns=DEFAULT_MAX_TURNS, call_timeout=DEFAULT_CALL_TIMEOUT,
+        deadline=None, gate=None, keep_alive=None, transport=None,
+        on_event=None):
+    """Drive one bounded agentic run against the local node chain.
+
+    ``tools`` is a list of :class:`Tool`. ``dialect``/``options`` override the
+    registry profile for ``model``. ``transport(host, payload, timeout)`` is
+    injectable for tests. ``on_event(kind, detail)`` is an optional progress
+    callback (never load-bearing). Returns ``(answer, meta)``; raises
+    :class:`HarnessError` when a bound refuses or every node fails.
+    """
+    transport = transport or _default_transport
+    node = local_llm.NODES[0]
+    mdl = model or node["model"]
+    prof = registry.profile_for(mdl)
+    dia = dialect or prof["dialect"]
+    opts = dict(prof.get("options") or {})
+    opts.update(options or {})
+    think = opts.pop("think", False)
+    keep_alive = keep_alive or local_llm.DEFAULT_KEEP_ALIVE
+    toolmap = {t.name: t for t in tools}
+    if len(toolmap) != len(tools):
+        raise HarnessError("duplicate tool names in toolset")
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": task})
+
+    meta = {"model": mdl, "host": node["host"], "dialect": dia,
+            "turns": 0, "tool_calls": [], "denied": [], "wall_s": 0.0,
+            "eval_count": 0, "prompt_eval_count": 0}
+    t0 = time.monotonic()
+
+    def emit(kind, detail):
+        if on_event:
+            try:
+                on_event(kind, detail)
+            except Exception:  # noqa: BLE001 — progress must never kill the run
+                pass
+
+    for _turn in range(max_turns):
+        if deadline is not None and time.monotonic() - t0 > deadline:
+            meta["wall_s"] = time.monotonic() - t0
+            raise HarnessError(
+                "wall budget %ss exhausted after %d turns" % (deadline, meta["turns"]),
+                meta)
+        payload_msgs, payload_tools = dialects.encode(
+            messages, [t.spec() for t in tools], dia)
+        payload = {"model": mdl, "messages": payload_msgs, "stream": False,
+                   "think": think, "keep_alive": keep_alive,
+                   "options": opts or {}}
+        if payload_tools:
+            payload["tools"] = payload_tools
+        try:
+            body = transport(node["host"], payload, call_timeout)
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            meta["wall_s"] = time.monotonic() - t0
+            raise HarnessError("node %s (%s) failed: %s"
+                               % (node["host"], mdl, e), meta)
+        meta["turns"] += 1
+        meta["eval_count"] += body.get("eval_count") or 0
+        meta["prompt_eval_count"] += body.get("prompt_eval_count") or 0
+
+        decoded = dialects.decode(body)
+        if not decoded.calls:
+            meta["wall_s"] = time.monotonic() - t0
+            return decoded.text, meta
+
+        # Record the assistant turn as the model produced it, then execute.
+        messages.append(body.get("message")
+                        or {"role": "assistant", "content": decoded.text})
+        for call in decoded.calls:
+            name, args = call["name"], call["args"]
+            emit("tool_call", {"name": name, "args_keys": sorted(args)})
+            tool = toolmap.get(name)
+            if tool is None:
+                result = ("ERROR: unknown tool %r. Available: %s"
+                          % (name, ", ".join(sorted(toolmap))))
+                meta["tool_calls"].append((name, "unknown"))
+            elif gate is not None and not _gate_ok(gate, name, args, meta):
+                result = "DENIED by policy: %s" % meta["denied"][-1][1]
+            else:
+                try:
+                    result = _truncate(str(tool.fn(args)))
+                    meta["tool_calls"].append((name, "ok"))
+                except Exception as e:  # noqa: BLE001 — fed back, not fatal
+                    result = "ERROR: %s: %s" % (type(e).__name__, e)
+                    meta["tool_calls"].append((name, "error"))
+            messages.append(dialects.tool_result_message(name, result, dia))
+
+    meta["wall_s"] = time.monotonic() - t0
+    raise HarnessError("turn budget %d exhausted without a final answer"
+                       % max_turns, meta)
+
+
+def _gate_ok(gate, name, args, meta):
+    """Run the enforcement gate; record and refuse on denial (never silent)."""
+    try:
+        verdict = gate(name, args)
+    except Exception as e:  # a broken gate fails CLOSED
+        meta["denied"].append((name, "gate error: %s" % e))
+        meta["tool_calls"].append((name, "denied"))
+        return False
+    allowed, reason = (verdict if isinstance(verdict, tuple)
+                       else (bool(verdict), "denied by policy"))
+    if not allowed:
+        meta["denied"].append((name, reason))
+        meta["tool_calls"].append((name, "denied"))
+        return False
+    return True
+
+
+def run_agentic(task, workdir, *, timeout=DEFAULT_WALL_BUDGET, model=None,
+                max_turns=DEFAULT_MAX_TURNS, gate=None, on_event=None):
+    """The agentic local floor — same shape as ``_lib/codex_local.run_agentic``.
+
+    Multi-step local-tool work (fs + bounded bash) confined to ``workdir``,
+    against the .21 node. Returns ``(answer, meta)``.
+    """
+    try:
+        from . import tools_local
+    except ImportError:
+        import tools_local
+    if not local_llm.available():
+        raise HarnessError("no local node reachable — is the .21 Ollama node up?")
+    system = ("You are a capable agent working inside the directory %s. "
+              "Use the tools to complete the task, then give a short final "
+              "answer stating what you did." % workdir)
+    return run(task, tools_local.standard_tools(workdir), model=model,
+               system=system, max_turns=max_turns, deadline=timeout,
+               gate=gate, on_event=on_event)

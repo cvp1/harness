@@ -1,0 +1,60 @@
+{
+  "_comment": "model tag -> dialect assignment. Data, not code (Principle 10): the assignment can change per measured evidence without touching the loop. First fnmatch wins; 'proven' cites the measurement, 'assumed' means probe before trusting (python -m harness --probe <model>).",
+  "default": {"dialect": "native", "options": {"think": false}},
+  "models": [
+    {
+      "match": "gemma4-e4b-agent*",
+      "dialect": "native",
+      "options": {"think": false},
+      "status": "proven",
+      "evidence": "bench_tier0 tools(8)+tools(4) PASS; profile_gate.sh 3/3 (LOCAL_FLEET §4z, 2026-07-26)"
+    },
+    {
+      "match": "gemma4-*agent*",
+      "dialect": "native",
+      "options": {"think": false},
+      "status": "proven",
+      "evidence": "gemma4-12b-agent-16k prior incumbent, gated §4r-§4z"
+    },
+    {
+      "match": "qwen*",
+      "dialect": "native",
+      "options": {"think": false},
+      "status": "assumed",
+      "note": "think=false REQUIRED or CoT eats num_predict before the tool_call (think_models.py, bench_tier0 header)"
+    },
+    {
+      "match": "hermes3*",
+      "dialect": "native",
+      "options": {"think": false},
+      "status": "assumed",
+      "note": "Hermes-3 template ships native tools; its XML <tool_call> drift is caught by the universal decoder"
+    },
+    {
+      "match": "mistral*",
+      "dialect": "native",
+      "options": {"think": false},
+      "status": "assumed"
+    },
+    {
+      "match": "llama3*",
+      "dialect": "native",
+      "options": {"think": false},
+      "status": "assumed"
+    },
+    {
+      "match": "deepseek-r1*",
+      "dialect": "prompted",
+      "options": {"think": false},
+      "status": "assumed",
+      "note": "r1 distills have no tool template; prompted protocol + think-strip"
+    },
+    {
+      "match": "gemma3*",
+      "dialect": "prompted",
+      "options": {"think": false},
+      "status": "assumed",
+      "note": "gemma3 chat template lacks a native tool role"
+    }
+  ]
+}
