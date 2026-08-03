@@ -46,8 +46,22 @@
       "match": "granite*",
       "dialect": "native",
       "options": {"think": false},
-      "status": "assumed",
-      "note": "dogma-2 suite chain PASS @32k 2026-08-03 (their shim/evaluator, not our probe — cc-handoff 011239Z reply)"
+      "status": "proven",
+      "evidence": "harness --probe granite4.1:8b 2026-08-03: native+prompted PASS; --gate 3/3 multi-step PASS (17.4/8.5/8.6s) — our instrument; corroborates dogma-2 suite chain PASS @32k"
+    },
+    {
+      "match": "ministral*",
+      "dialect": "native",
+      "options": {"think": false},
+      "status": "proven",
+      "evidence": "harness --probe ministral-3:8b 2026-08-03: native PASS 14.0s + prompted PASS 2.7s. NB fnmatch 'mistral*' does NOT cover 'ministral*' — separate row required"
+    },
+    {
+      "match": "lfm2.5*",
+      "dialect": "native",
+      "options": {"think": false},
+      "status": "proven",
+      "note": "DIALECT assignment only, not agent-fitness: probe 2026-08-03 native PASS 18.3s, prompted FAIL (empty reply). Multi-step: harness --gate 0/3 (chain collapse) 2026-08-03, confirming profile_gate 0/3 (§4w) on OUR instrument — do not promote to agentic duty"
     },
     {
       "match": "deepseek-r1*",

@@ -143,12 +143,32 @@ reported to the model — never silent. A gate that *crashes* fails CLOSED.
   it correctly in the final answer — a multi-step run with real error
   handling, zero external harness in the loop.
 
+## 7a. Gate arm + registry promotions (2026-08-03)
+
+`gate.py` (the §8 harness-native gate arm, now BUILT): 3 fresh-workdir trials
+of a create → bash-derive → write-derived chain, mechanically scored on
+filesystem state. Instrument validated in BOTH directions the same day:
+
+* **Positive control:** incumbent gemma4-e4b **3/3** (18.0/6.4/6.5s).
+* **Known-bad:** lfm2.5-agent-64k **0/3** (chain collapse) — reproduces the
+  §4w profile_gate verdict on our instrument.
+* **First new promotion:** granite4.1:8b **3/3** (17.4/8.5/8.6s) + probe PASS
+  both dialects. ministral-3:8b probe PASS both dialects (NB: fnmatch
+  `mistral*` does NOT cover `ministral*` — separate registry row).
+
+Instrument lesson, kept honest: v1 of the scorer failed its own positive
+control twice — first demanding a literal "3" where a no-trailing-newline
+file legitimately derives 2 from `wc -l`, then rejecting raw `wc` output
+cosmetics ("2 data.txt"). Both were the fragile-conditional trap dogma-2's
+reply warned about; the scorer now scores the CHAIN (faithful derivation),
+never formatting lotteries. A gate whose positive control fails is measuring
+its own task prose.
+
 ## 8. Next (not in this build)
 
 * dogma-2 adapts `model_shim.call_once` to the §3 transport interface (their
   proposal, their side); hermes' HA lane and `codex_local`'s floor migrate
   behind `run_agentic` once the shims land and gate green.
-* Probe + registry rows for qwen/mistral/llama3/granite tags when next pulled
-  (`assumed` → `proven`; granite carries dogma-2 suite evidence already).
-* `profile_gate.sh` / `mini_gate.py` grow a harness-native arm so model gating
-  and production share one loop.
+* Probe + registry rows for qwen/mistral/llama3 tags when next pulled.
+* Retire the external-harness arms of `profile_gate.sh` / `mini_gate.py` in
+  favor of `--gate` once the fleet accepts it as the standard instrument.

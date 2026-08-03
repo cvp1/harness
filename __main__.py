@@ -62,6 +62,9 @@ def main(argv=None):
                     help="wall budget seconds")
     ap.add_argument("--no-bash", action="store_true", help="drop run_bash from the set")
     ap.add_argument("--probe", metavar="MODEL", help="dialect-probe a model")
+    ap.add_argument("--gate", metavar="MODEL",
+                    help="multi-step agentic gate (mechanical fs scoring)")
+    ap.add_argument("--trials", type=int, default=3, help="gate trials")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--json", action="store_true", help="print meta as JSON")
     args = ap.parse_args(argv)
@@ -71,6 +74,11 @@ def main(argv=None):
         return selftest.main()
     if args.probe:
         return probe(args.probe)
+    if args.gate:
+        from . import gate as gate_mod
+        verdict = gate_mod.gate(args.gate, trials=args.trials)
+        print(json.dumps(verdict, indent=2))
+        return 0 if verdict["verdict"] == "PASS" else 1
     if not args.task:
         ap.error("a task (or --probe/--selftest) is required")
 

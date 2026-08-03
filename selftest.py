@@ -284,9 +284,38 @@ def test_tools_local():
         ok("run_bash" not in nb, "tools_local: bash=False drops bash")
 
 
+def test_gate_scoring():
+    if __package__ in (None, ""):
+        from harness import gate
+    else:
+        from . import gate
+    with tempfile.TemporaryDirectory() as td:
+        passed, checks = gate.score(td)
+        ok(not passed and not any(v for k, v in checks.items() if k != "detail"),
+           "gate: empty dir scores FAIL")
+        (Path(td) / "data.txt").write_text("alpha\nbravo\ncharlie\n")
+        (Path(td) / "report").mkdir()
+        (Path(td) / "report" / "count.txt").write_text("3\n")
+        passed, _ = gate.score(td)
+        ok(passed, "gate: exact state scores PASS")
+        # No trailing newline + faithful wc -l derivation (2) also PASSES —
+        # the positive-control bug from 2026-08-03.
+        (Path(td) / "data.txt").write_text("alpha\nbravo\ncharlie")
+        (Path(td) / "report" / "count.txt").write_text("2")
+        passed, _ = gate.score(td)
+        ok(passed, "gate: faithful no-trailing-newline derivation PASSES")
+        (Path(td) / "report" / "count.txt").write_text("2 data.txt\n")
+        passed, _ = gate.score(td)
+        ok(passed, "gate: raw wc output form PASSES (chain over cosmetics)")
+        (Path(td) / "report" / "count.txt").write_text("7")
+        passed, checks = gate.score(td)
+        ok(not passed and checks["data.txt content"],
+           "gate: unfaithful count FAILs that check only")
+
+
 def main():
     for fn in (test_decoder, test_encoder, test_registry, test_loop,
-               test_tools_local):
+               test_tools_local, test_gate_scoring):
         print("--- %s ---" % fn.__name__)
         fn()
     print()
