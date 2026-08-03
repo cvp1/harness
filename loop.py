@@ -154,7 +154,7 @@ def _truncate(text, cap=MAX_RESULT_CHARS):
 def run(task, tools, *, model=None, system=None, dialect=None, options=None,
         max_turns=DEFAULT_MAX_TURNS, call_timeout=DEFAULT_CALL_TIMEOUT,
         deadline=None, gate=None, keep_alive=None, transport=None,
-        on_event=None):
+        on_event=None, history=None, should_stop=None):
     """Drive one bounded agentic run against the local node chain.
 
     ``tools`` is a list of :class:`Tool`. ``dialect``/``options`` override the
@@ -179,6 +179,9 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
+    # Prior conversation turns (multi-turn consumers: the ACP pane). Caller-
+    # owned plain chat messages; the loop neither trims nor rewrites them.
+    messages.extend(history or [])
     messages.append({"role": "user", "content": task})
 
     meta = {"model": mdl, "host": host, "dialect": dia,
@@ -194,6 +197,9 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
                 pass
 
     for _turn in range(max_turns):
+        if should_stop is not None and should_stop():
+            meta["wall_s"] = time.monotonic() - t0
+            raise HarnessError("cancelled by caller", meta)
         if deadline is not None and time.monotonic() - t0 > deadline:
             meta["wall_s"] = time.monotonic() - t0
             raise HarnessError(
