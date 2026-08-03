@@ -112,6 +112,20 @@ def main():
         ok([m["content"] for m in saved["history"]] ==
            ["hello", "echo: hello", "again", "echo: again"],
            "history persisted across turns")
+        # set_config: opencode-era namespaced ids normalize; junk refuses loud
+        r = c.request("session/set_config_option",
+                      {"sessionId": sid, "configId": "model",
+                       "value": "ollama/fake-model"})
+        ok(r["configOptions"][0]["currentValue"] == "fake-model",
+           "set_config: 'ollama/' namespace stripped (the corral 404 bug)")
+        try:
+            c.request("session/set_config_option",
+                      {"sessionId": sid, "configId": "model",
+                       "value": "no-such-model"})
+            ok(False, "set_config: unknown model refused loudly")
+        except RuntimeError as e:
+            ok("no-such-model" in str(e) and "have:" in str(e),
+               "set_config: unknown model refused loudly")
         # session/list + load from disk
         lst = c.request("session/list", {})["sessions"]
         ok(any(s["sessionId"] == sid for s in lst), "session/list finds it")

@@ -308,7 +308,7 @@ class Server:
         elif path.is_file():
             data = json.loads(path.read_text())
             sess = self._new_session(sid, params.get("cwd") or data["cwd"],
-                                     model=data.get("model"),
+                                     model=self._normalize_model(data.get("model")) or None,
                                      history=data.get("history") or [],
                                      title=data.get("title", ""))
         else:
@@ -330,13 +330,36 @@ class Server:
                         "updatedAt": d.get("updatedAt")})
         return {"sessions": out[:100]}
 
+    @staticmethod
+    def _normalize_model(value):
+        """Strip provider namespaces off a model id.
+
+        Corral remembers a pane's last model per lane and re-applies it on
+        create — and the retired opencode lane remembered ids like
+        ``ollama/gemma4-e4b-agent-64k:latest``. Ollama's own API has no such
+        namespace, so storing that verbatim 404'd every prompt (live,
+        2026-08-03). The tag is the tag; prefixes are someone else's routing.
+        """
+        value = (value or "").strip()
+        if "/" in value and value.split("/", 1)[0] in ("ollama", "local"):
+            value = value.split("/", 1)[1]
+        return value
+
     def _h_set_config(self, params):
         sess = self.sessions.get(params.get("sessionId"))
         if sess is None:
             raise ValueError("unknown session")
         if params.get("configId") != "model":
             raise ValueError("only 'model' is configurable")
-        sess["model"] = params.get("value")
+        want = self._normalize_model(params.get("value"))
+        opts = self._config_options(sess)
+        known = [o["value"] for o in opts[0]["options"]]
+        if known and want not in known:
+            # Refuse loudly with the fix in the message — Corral renders this
+            # as a note and keeps the current model, which is the safe default.
+            raise ValueError("unknown model %r on the node; have: %s"
+                             % (want, ", ".join(known[:6])))
+        sess["model"] = want
         self._persist(sess)
         return {"configOptions": self._config_options(sess)}
 
