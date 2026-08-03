@@ -9,7 +9,22 @@ opencode, no Codex CLI in the path.
 cd ~/Github/CC
 /usr/bin/python3 -m harness.selftest                 # offline, no network
 /usr/bin/python3 -m harness --probe <model-tag>      # which dialect passes?
+/usr/bin/python3 -m harness --gate  <model-tag>      # multi-step fitness, 3 trials
 /usr/bin/python3 -m harness "task…" --workdir DIR    # run the agentic floor
+```
+
+## Standalone — the artifact travels
+
+Zero dependencies beyond python3 stdlib + any Ollama-speaking node. Inside
+the CC workspace the node fact comes from `_lib/local_llm` (one home);
+anywhere else, environment takes over:
+
+```sh
+git clone https://github.com/cvp1/harness.git && cd ..   # run from the parent dir
+python3 -m harness.selftest                              # green, no network, no _lib
+HARNESS_NODE=192.168.86.21 python3 -m harness --probe gemma4-e4b-agent-64k
+HARNESS_NODE=host[:port]   # default 127.0.0.1:11434
+HARNESS_MODEL=tag          # default: first non-embedding tag on the node
 ```
 
 ```python

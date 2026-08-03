@@ -31,13 +31,25 @@ import time
 import urllib.error
 import urllib.request
 
+# Node resolution, two worlds:
+#   * Inside the CC workspace, `_lib.local_llm` stays the ONE home for the
+#     node fact (host, resident model, keep_alive policy) — never a second
+#     copy here.
+#   * Standalone (the artifact cloned anywhere), `_lib` is absent by design:
+#     HARNESS_NODE ("host" or "host:port", default 127.0.0.1) and
+#     HARNESS_MODEL (default: first non-embedding tag on the node) take over.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _lib import local_llm  # noqa: E402 — one home for the .21 node fact
+try:
+    from _lib import local_llm
+except ImportError:
+    local_llm = None
 
 try:
     from . import dialects, registry
 except ImportError:  # run as a loose script rather than a package
     import dialects, registry  # noqa: F401
+
+DEFAULT_PORT = 11434
 
 MAX_RESULT_CHARS = 8000       # cap on any single tool result fed back
 DEFAULT_MAX_TURNS = 12        # model calls per run
@@ -70,14 +82,67 @@ class Tool:
                 "parameters": self.parameters}
 
 
+def _endpoint(host):
+    """``host`` may be bare ("192.168.86.21") or carry a port ("...:11435").
+
+    A transport treats it as an opaque endpoint id — seam §3 unchanged.
+    """
+    return host if ":" in host else "%s:%d" % (host, DEFAULT_PORT)
+
+
 def _default_transport(host, payload, timeout):
     """One non-streaming /api/chat POST. Kept tiny so tests inject a fake."""
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        "http://%s:%d/api/chat" % (host, local_llm.NODE_PORT), data=data,
+        "http://%s/api/chat" % _endpoint(host), data=data,
         headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def node_available(host=None, timeout=4):
+    """Cheap liveness probe of the resolved node (GET /api/version)."""
+    if host is None:
+        host = _resolve_host()
+    try:
+        req = urllib.request.Request("http://%s/api/version" % _endpoint(host))
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def _first_tag(host, timeout=6):
+    """Standalone default model: the node's first non-embedding tag."""
+    req = urllib.request.Request("http://%s/api/tags" % _endpoint(host))
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        tags = json.loads(resp.read().decode("utf-8")).get("models") or []
+    for m in tags:
+        if "embed" not in m.get("name", ""):
+            return m["name"]
+    raise HarnessError("no usable model tag on node %s" % host)
+
+
+def _resolve_host():
+    """Cheap, zero-network: _lib's node fact when present, else HARNESS_NODE."""
+    if local_llm is not None:
+        return local_llm.NODES[0]["host"]
+    return os.environ.get("HARNESS_NODE", "127.0.0.1")
+
+
+def _resolve_model(host, model):
+    """Lazy: only the standalone-no-env path costs a network tags call."""
+    if model:
+        return model
+    if local_llm is not None:
+        return local_llm.NODES[0]["model"]
+    return os.environ.get("HARNESS_MODEL") or _first_tag(host)
+
+
+def _resolve_keep_alive(keep_alive):
+    if keep_alive:
+        return keep_alive
+    return local_llm.DEFAULT_KEEP_ALIVE if local_llm is not None else "10m"
 
 
 def _truncate(text, cap=MAX_RESULT_CHARS):
@@ -99,14 +164,14 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
     :class:`HarnessError` when a bound refuses or every node fails.
     """
     transport = transport or _default_transport
-    node = local_llm.NODES[0]
-    mdl = model or node["model"]
+    host = _resolve_host()
+    mdl = _resolve_model(host, model)
     prof = registry.profile_for(mdl)
     dia = dialect or prof["dialect"]
     opts = dict(prof.get("options") or {})
     opts.update(options or {})
     think = opts.pop("think", False)
-    keep_alive = keep_alive or local_llm.DEFAULT_KEEP_ALIVE
+    keep_alive = _resolve_keep_alive(keep_alive)
     toolmap = {t.name: t for t in tools}
     if len(toolmap) != len(tools):
         raise HarnessError("duplicate tool names in toolset")
@@ -116,7 +181,7 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": task})
 
-    meta = {"model": mdl, "host": node["host"], "dialect": dia,
+    meta = {"model": mdl, "host": host, "dialect": dia,
             "turns": 0, "tool_calls": [], "denied": [], "wall_s": 0.0,
             "eval_count": 0, "prompt_eval_count": 0}
     t0 = time.monotonic()
@@ -142,11 +207,11 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
         if payload_tools:
             payload["tools"] = payload_tools
         try:
-            body = transport(node["host"], payload, call_timeout)
+            body = transport(host, payload, call_timeout)
         except (urllib.error.URLError, OSError, ValueError) as e:
             meta["wall_s"] = time.monotonic() - t0
             raise HarnessError("node %s (%s) failed: %s"
-                               % (node["host"], mdl, e), meta)
+                               % (host, mdl, e), meta)
         meta["turns"] += 1
         # Token accounting from either body shape (Ollama-native counters, or
         # OpenAI-compatible `usage` from LM Studio / model_shim backends).
@@ -227,8 +292,9 @@ def run_agentic(task, workdir, *, timeout=DEFAULT_WALL_BUDGET, model=None,
         from . import tools_local
     except ImportError:
         import tools_local
-    if not local_llm.available():
-        raise HarnessError("no local node reachable — is the .21 Ollama node up?")
+    if not node_available():
+        raise HarnessError("no node reachable at %s — is Ollama up?"
+                           % _resolve_host())
     system = ("You are a capable agent working inside the directory %s. "
               "Use the tools to complete the task, then give a short final "
               "answer stating what you did." % workdir)
