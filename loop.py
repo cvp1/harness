@@ -301,3 +301,23 @@ def run_agentic(task, workdir, *, timeout=DEFAULT_WALL_BUDGET, model=None,
     return run(task, tools_local.standard_tools(workdir), model=model,
                system=system, max_turns=max_turns, deadline=timeout,
                gate=gate, on_event=on_event)
+
+
+def with_agentic_fallback(primary, task, workdir, *, probe_first=True,
+                          on_fallback=None, **kw):
+    """Run ``primary()`` (a thunk); on any failure, degrade to the local floor.
+
+    The agentic sibling of ``_lib/local_llm.with_fallback`` — same shape as
+    the ``codex_local`` version it supersedes (2026-08-03), so consumers swap
+    by import. Returns ``(result, source)`` with source ``"primary"`` or
+    ``"local"``. With ``probe_first`` and no reachable node, the primary's
+    exception re-raises unwrapped.
+    """
+    try:
+        return primary(), "primary"
+    except Exception as primary_exc:  # noqa: BLE001 — primary can fail any way
+        if on_fallback:
+            on_fallback(primary_exc)
+        if probe_first and not node_available():
+            raise
+        return run_agentic(task, workdir, **kw), "local"
