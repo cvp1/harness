@@ -54,7 +54,7 @@
       "dialect": "native",
       "options": {"think": false},
       "status": "proven",
-      "evidence": "harness --probe ministral-3:8b 2026-08-03: native PASS 14.0s + prompted PASS 2.7s. NB fnmatch 'mistral*' does NOT cover 'ministral*' — separate row required"
+      "evidence": "harness --probe ministral-3:8b 2026-08-03: native PASS 14.0s + prompted PASS 2.7s; --gate 3/3 multi-step PASS (38.2/16.9/27.9s, 7/7/10 turns — passes, but slower and chattier than e4b/granite). NB fnmatch 'mistral*' does NOT cover 'ministral*' — separate row required"
     },
     {
       "match": "lfm2.5*",
