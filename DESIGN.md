@@ -78,6 +78,22 @@ Division of labor, per their reply and accepted here:
   output) plugs in BEHIND this seam as an injectable transport — it is not a
   second loop. Their host layer (residency attribution, memory preflight,
   local safety policy) rides as injectable gate hooks, not dialect code.
+* **Payload fidelity — a transport DELIVERS the payload, it does not re-derive
+  it.** `model`, `messages`, `tools`, `think`, `keep_alive` and **`options`**
+  (whole dict, incl. `num_ctx` / `num_predict` / `temperature`) reach the
+  provider unchanged. A transport MAY add fields the provider needs; it MUST
+  NOT drop, rename, or override one the loop set. Where a transport's own
+  request shape differs, its defaults lose to the harness's values.
+  *Added 2026-08-04 after the omission bit:* §3a pinned only the RETURN
+  direction, so a shim that rebuilt the request from its own top-level
+  `temperature`/`context`/`max_tokens` keys silently dropped
+  `payload["options"]` — `num_ctx` 4096→32768, `num_predict` 64→2048 — and
+  passed its own tests, ours, and a rival-model review, because all three
+  exercised one side. §1 names `num_ctx` garble and CoT eating `num_predict`
+  as two of the three defects that justified owning this layer; re-introducing
+  them inside a transport disguises them as *model* failures. Instrument:
+  `reviews/conform_seam.py` drives this loop with a foreign transport and
+  asserts what reached the wire — run it against any shim revision.
 * **A transport may return either body shape** — Ollama-native
   (`body.message`) or OpenAI-compatible (`body.choices[0].message`);
   `dialects.message_of()` normalizes, the loop never branches. Usage is read
