@@ -62,6 +62,101 @@ SYSTEM = ("You are a capable local agent working inside the directory %s. "
           "Use the tools when they help; answer concisely. If a tool is "
           "DENIED by the operator, respect it and continue without it.")
 
+# --------------------------------------------------------------------------- #
+# Model BACKEND seam ($HARNESS_ACP_PROVIDER, default the sovereign .21 node).   #
+#                                                                              #
+# The harness is the loop, the tools, and the permission rail; WHICH model      #
+# answers is a separate axis, and this server had the .21 node wired into two   #
+# places (the picker's source and the transport). Naming the seam lets the      #
+# identical rail — same exact-bytes diff, same fail-closed permission — front   #
+# open-weight models the fleet cannot reach any other way, without a second     #
+# copy of this file.                                                            #
+#                                                                              #
+# What a provider is: `models()` -> the picker's live values (never hardcoded), #
+# `transport` -> the loop's injectable seam (None = loop's own Ollama default), #
+# `data_class` -> the ceiling on what may be typed into a pane on this lane.    #
+# The data class is a FACT ABOUT THE VENDOR, and its one authority is           #
+# `_lib.merit_policy.CANDIDATES` — it is read from there, never restated here,  #
+# because a second copy is exactly how the Grok ruling sat wrong for four days. #
+# --------------------------------------------------------------------------- #
+PROVIDER = os.environ.get("HARNESS_ACP_PROVIDER", "local").strip().lower()
+
+
+def _data_class_for(target):
+    """The ceiling for `target`, from merit_policy — the ONE authority.
+
+    Fails CLOSED (PRINCIPLES 4): if the taxonomy cannot be read, or names a
+    provider we do not know, the answer is the restrictive `internal`, never an
+    optimistic `sensitive`.
+    """
+    try:
+        from _lib import merit_policy
+        return ("sensitive" if merit_policy.eligible(target, "sensitive", True)
+                else "internal")
+    except Exception:  # noqa: BLE001 — unreadable taxonomy => the closed answer
+        return "internal"
+
+
+def _local_models():
+    """Live tags off the node the loop would call. Raises; caller degrades."""
+    host = hloop._resolve_host()
+    req = __import__("urllib.request", fromlist=["urlopen"])
+    with req.urlopen("http://%s/api/tags" % hloop._endpoint(host),
+                     timeout=6) as resp:
+        tags = json.loads(resp.read().decode()).get("models") or []
+    return [m["name"] for m in tags if "embed" not in m.get("name", "")][:20]
+
+
+def _local_default():
+    return hloop._resolve_model(hloop._resolve_host(), None)
+
+
+def _fireworks_models():
+    from harness import fireworks_transport as fw
+    # Tool-capable models only: every pane on this lane is handed write_file /
+    # run_bash, and a model that cannot emit a tool_call would sit in the picker
+    # looking usable while silently never being able to act. The provider
+    # publishes the flag, so this is a filter on fact, not a guess.
+    return [m["id"] for m in fw.list_models() if m["tools"]][:20]
+
+
+def _fireworks_default():
+    from _lib import fireworks_llm
+    return fireworks_llm.MODEL
+
+
+def _fireworks_transport():
+    from harness import fireworks_transport as fw
+    return fw.transport
+
+
+PROVIDERS = {
+    "local": {
+        "label": "Ollama .21",
+        "models": _local_models,
+        "default": _local_default,
+        "transport": lambda: None,     # loop.run's own /api/chat default
+        "target": "local",             # merit_policy key -> sovereign
+        "where": "on the node",        # phrasing for the unknown-model refusal
+    },
+    "fireworks": {
+        "label": "Fireworks.ai",
+        "models": _fireworks_models,
+        "default": _fireworks_default,
+        "transport": _fireworks_transport,
+        "target": "fireworks",         # merit_policy key -> THIRD party
+        "where": "on Fireworks",
+    },
+}
+if PROVIDER not in PROVIDERS:
+    # Loud and fatal, not a silent fallback to local: a pane that quietly
+    # answered from a different vendor than the lane promised would be the one
+    # failure this seam must never have.
+    raise SystemExit("harness-acp: unknown HARNESS_ACP_PROVIDER %r (have: %s)"
+                     % (PROVIDER, ", ".join(sorted(PROVIDERS))))
+SPEC = PROVIDERS[PROVIDER]
+DATA_CLASS = _data_class_for(SPEC["target"])
+
 
 def _now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -163,15 +258,9 @@ class Server:
             values, current = ["fake-model"], current or "fake-model"
         else:
             try:
-                host = hloop._resolve_host()
                 if current is None:
-                    current = hloop._resolve_model(host, None)
-                req = __import__("urllib.request", fromlist=["urlopen"])
-                with req.urlopen("http://%s/api/tags" % hloop._endpoint(host),
-                                 timeout=6) as resp:
-                    tags = json.loads(resp.read().decode()).get("models") or []
-                values = [m["name"] for m in tags
-                          if "embed" not in m.get("name", "")][:20]
+                    current = SPEC["default"]()
+                values = SPEC["models"]()
             except Exception:  # noqa: BLE001 — picker degrades, session works
                 values = [current] if current else []
         sess["model"] = current
@@ -288,9 +377,16 @@ class Server:
 
     # ── handlers ──────────────────────────────────────────────────────────
     def _h_initialize(self, params):
+        # The provider is reported, not implied: two lanes now run this same
+        # binary against different vendors with different data ceilings, and a
+        # pane that cannot say which one it is would leave Craig guessing what
+        # he may safely type into it.
         return {"protocolVersion": 1, "authMethods": [],
                 "agentCapabilities": {"loadSession": True},
-                "serverInfo": {"name": "harness-acp", "version": "0.1"}}
+                "serverInfo": {"name": "harness-acp", "version": "0.2",
+                               "provider": PROVIDER,
+                               "backend": SPEC["label"],
+                               "dataClass": DATA_CLASS}}
 
     def _h_new(self, params):
         sid = "h-%s" % uuid.uuid4().hex[:12]
@@ -357,8 +453,8 @@ class Server:
         if known and want not in known:
             # Refuse loudly with the fix in the message — Corral renders this
             # as a note and keeps the current model, which is the safe default.
-            raise ValueError("unknown model %r on the node; have: %s"
-                             % (want, ", ".join(known[:6])))
+            raise ValueError("unknown model %r %s; have: %s"
+                             % (want, SPEC["where"], ", ".join(known[:6])))
         sess["model"] = want
         self._persist(sess)
         return {"configOptions": self._config_options(sess)}
@@ -377,7 +473,8 @@ class Server:
             sess["cancel"].clear()
             if not sess["title"]:
                 sess["title"] = text[:60]
-            transport = _fake_transport(self.fake) if self.fake else None
+            transport = (_fake_transport(self.fake) if self.fake
+                         else SPEC["transport"]())
             try:
                 answer, meta = hloop.run(
                     text, self._tools_for(sess), model=sess["model"],
