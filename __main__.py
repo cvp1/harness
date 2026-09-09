@@ -65,9 +65,10 @@ def main(argv=None):
     ap.add_argument("--gate", metavar="MODEL",
                     help="multi-step agentic gate (mechanical fs scoring)")
     ap.add_argument("--trials", type=int, default=3, help="gate trials")
-    ap.add_argument("--provider", default="local", choices=("local", "fireworks"),
+    ap.add_argument("--provider", default="local",
+                    choices=("local", "fireworks", "deepseek"),
                     help="with --gate: which transport serves the model "
-                         "(fireworks = the hosted open-weight lane, spends cents)")
+                         "(fireworks / deepseek = hosted lanes, spend cents)")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--json", action="store_true", help="print meta as JSON")
     args = ap.parse_args(argv)
@@ -83,6 +84,9 @@ def main(argv=None):
         if args.provider == "fireworks":
             from . import fireworks_transport
             transport = fireworks_transport.transport
+        elif args.provider == "deepseek":
+            from . import deepseek_transport
+            transport = deepseek_transport.transport
         verdict = gate_mod.gate(args.gate, trials=args.trials, transport=transport)
         verdict["provider"] = args.provider
         print(json.dumps(verdict, indent=2))

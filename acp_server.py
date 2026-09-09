@@ -130,6 +130,21 @@ def _fireworks_transport():
     return fw.transport
 
 
+def _deepseek_models():
+    from harness import deepseek_transport as ds
+    return [m["id"] for m in ds.list_models() if m["tools"]][:20]
+
+
+def _deepseek_default():
+    from _lib import deepseek_llm
+    return deepseek_llm.MODEL
+
+
+def _deepseek_transport():
+    from harness import deepseek_transport as ds
+    return ds.transport
+
+
 PROVIDERS = {
     "local": {
         "label": "Ollama .21",
@@ -146,6 +161,16 @@ PROVIDERS = {
         "transport": _fireworks_transport,
         "target": "fireworks",         # merit_policy key -> THIRD party
         "where": "on Fireworks",
+    },
+    "deepseek": {
+        # DeepSeek at DIRECT prices (2026-09-09): the same model costs ~2x
+        # via Fireworks, so a DeepSeek pane must never ride that lane.
+        "label": "DeepSeek (direct)",
+        "models": _deepseek_models,
+        "default": _deepseek_default,
+        "transport": _deepseek_transport,
+        "target": "deepseek",          # merit_policy key -> THIRD party
+        "where": "on DeepSeek",
     },
 }
 if PROVIDER not in PROVIDERS:

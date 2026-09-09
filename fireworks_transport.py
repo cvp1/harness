@@ -81,14 +81,17 @@ class FireworksTransportError(RuntimeError):
     """The Fireworks call could not be made."""
 
 
-def to_openai_body(payload):
+def to_openai_body(payload, qualify=None):
     """Rewrite one loop payload as a Fireworks/OpenAI request body.
 
     Pure and side-effect free (no network, no key) so the self-test can assert
-    the whole mapping without spending anything.
+    the whole mapping without spending anything. ``qualify`` maps the loop's
+    model id to the wire id — Fireworks' namespacing by default; another
+    OpenAI-shaped vendor (``deepseek_transport``) passes its own so the
+    Ollama→OpenAI rewrite lives in exactly one place.
     """
     body = {k: v for k, v in payload.items() if k not in _DROP}
-    body["model"] = fireworks_llm.qualify(payload.get("model"))
+    body["model"] = (qualify or fireworks_llm.qualify)(payload.get("model"))
     body["stream"] = False
 
     opts = payload.get("options") or {}
