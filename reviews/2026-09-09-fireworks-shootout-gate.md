@@ -731,3 +731,26 @@ print(json.dumps({"model": model, "passes": p, "trials": trials, "verdict": "PAS
  ]
 }
 ```
+
+## Round 3 — the Anthropic head-to-head (same day; Craig: "would Flash be faster and better than Sonnet?")
+
+Same two gates, same seeds, same disk scoring, driven by **headless Claude Code** (`_lib.claude_headless`, `--allowedTools Bash Write Read Edit`, skip-permissions, cwd = the temp workdir) on the Max plan. Caveat stated up front: Claude Code is a heavier harness than `harness/loop.py` (CLI startup, its own system prompt, its own tool set), so wall times are harness-plus-model, not model alone; the open models ran through our loop.
+
+| driver | gate | verdict | wall (3 trials) | turns | output tokens | cost |
+|---|---|---|---|---|---|---|
+| claude-opus (headless Claude Code, Max) | gate3 | 3/3 | 32.1 s | 3/3/3 | 909 | plan |
+| claude-opus (headless Claude Code, Max) | hard5 | 3/3 | 58.8 s | 5/6/4 | 2,749 | plan |
+| claude-sonnet (headless Claude Code, Max) | gate3 | 3/3 | 42.0 s | 5/5/4 | 1,236 | plan |
+| claude-sonnet (headless Claude Code, Max) | hard5 | 3/3 | 69.0 s | 6/7/7 | 2,068 | plan |
+| claude-haiku (headless Claude Code, Max) | gate3 | 3/3 | 45.7 s | 5/5/5 | 2,323 | plan |
+| claude-haiku (headless Claude Code, Max) | hard5 | 3/3 | 77.0 s | 8/11/10 | 4,815 | plan |
+| glm-5p3-flash (harness loop, default effort) | gate3 | 3/3 | 33.2 s | 5/4/5 | 1,444 | $0.0023 |
+| glm-5p3-flash (harness loop, default effort) | hard5 | 3/3 | 44.1 s | 6/7/5 | 2,424 | $0.0040 |
+| minimax-m3 (harness loop) | gate3 | 3/3 | 18.4 s | 4/6/5 | 1,558 | $0.0063 |
+| minimax-m3 (harness loop) | hard5 | 3/3 | 22.5 s | 6/7/6 | 1,638 | $0.0087 |
+
+**Accuracy: a tie on every instrument.** 18 Claude trials, 18 passes; 24 open-model trials, 24 passes. **Speed:** Flash ≈ Opus and ≈1.3x Sonnet on both gates; MiniMax is ≈2x Sonnet. Haiku is the slowest Anthropic driver here and burns the most output tokens (it narrates). Flash ran at its *max* reasoning default — `low` (0 reasoning tokens on the probe) would widen its speed lead.
+
+**Judgement work, same day:** shadow-review fixtures — Sonnet 6/6 HIGH, 0/4 false alarms; Haiku 6/6, 0/4 (but ~24 s/call headless vs ~5 s Sonnet vs ~1.5 s Flash); Flash/low 15/15, 0/10. Opus-judged merit A/B (tier-eval, `merit_eval.py`): Fireworks Flash/low non-inferior to Claude-cloud_cheap **8/8 on space_radar (Wilson-LB 0.68)** and **4/4 on signal_scan** — HOLD only because a paid rung needs LB ≥ 0.75 to PROPOSE.
+
+**What none of this proves:** these are bounded tasks with a known answer. Nothing here measures a real multi-file implementation with ambiguity, long context, or a repo the model has to learn — the place Sonnet/Opus earn their keep in Craig's sessions. That is the open measurement: one real plan item through the Corral Fireworks lane, ledger read afterwards.
