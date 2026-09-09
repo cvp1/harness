@@ -72,12 +72,18 @@ def score(workdir):
     return passed, checks
 
 
-def gate(model, trials=TRIALS, max_turns=10, on_event=None):
+def gate(model, trials=TRIALS, max_turns=10, on_event=None, transport=None):
     """Run ``trials`` independent multi-step trials; return the verdict dict.
 
     Each trial gets a FRESH temp workdir (no cross-trial contamination) and is
     scored on filesystem state only. A HarnessError (budget refused, node
     down) counts as a FAIL with the reason recorded — a refusal is a result.
+
+    ``transport`` is loop.run's injectable seam — None is the .21 node; pass
+    ``fireworks_transport.transport`` to gate a hosted open-weight model
+    through the identical loop and scoring (added 2026-09-09: the gate had
+    no way to reach the hosted lane, so a Fireworks model could be picked in
+    a pane but never qualified by this instrument).
     """
     results = []
     for i in range(trials):
@@ -88,7 +94,7 @@ def gate(model, trials=TRIALS, max_turns=10, on_event=None):
                 TASK, tools_local.standard_tools(wd), model=model,
                 system="You are a capable agent working inside %s. Follow the "
                        "task exactly." % wd,
-                max_turns=max_turns, on_event=on_event)
+                max_turns=max_turns, on_event=on_event, transport=transport)
             passed, checks = score(wd)
             results.append({"trial": i + 1, "pass": passed,
                             "wall_s": round(time.monotonic() - t0, 1),

@@ -46,6 +46,7 @@ Live check (1 call):   /usr/bin/python3 -m harness.fireworks_transport ping
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -70,6 +71,10 @@ _OPTION_MAP = {"num_predict": "max_tokens", "temperature": "temperature",
 # num_predict -1 means "unbounded" to Ollama; OpenAI-shaped APIs reject it.
 _UNBOUNDED = (-1, -2)
 DEFAULT_MAX_TOKENS = 4096
+# The ledger's `job` column for calls made through this seam. The seam
+# signature is fixed by loop.run (host, payload, timeout) and carries no job,
+# so it is process-scoped: the ACP server / gate runner set $HARNESS_JOB.
+JOB = os.environ.get("HARNESS_JOB", "harness-fireworks")
 
 
 class FireworksTransportError(RuntimeError):
@@ -125,9 +130,21 @@ def transport(host, payload, timeout):
         fireworks_llm.API_URL, data=data, method="POST",
         headers={"Content-Type": "application/json",
                  "Authorization": "Bearer %s" % key})
+    t0 = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            b = json.loads(resp.read().decode("utf-8"))
+        # Meter through the client's OWN path (LAST_META, CoT warning, the
+        # fireworks_usage.jsonl ledger) so a pane's spend is visible to the
+        # same ceiling a direct call is. Until 2026-09-09 this returned the
+        # body without accounting, and a Corral pane on this lane was
+        # invisible to observability. Never load-bearing: the body is
+        # returned verbatim whether or not the meter succeeds.
+        try:
+            fireworks_llm.meter(b, body["model"], time.monotonic() - t0, job=JOB)
+        except Exception as e:     # noqa: BLE001 — metering must not break a turn
+            print("fireworks_transport: meter skipped: %s" % e, file=sys.stderr)
+        return b
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:400]
         # ValueError is in loop.run's caught set, so this surfaces as a clean
