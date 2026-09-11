@@ -182,6 +182,39 @@ def main():
         ok(len(c.perms) == 1, "allow_always: second call skips the prompt")
         c.close()
 
+
+        # ── the vault is gated by the lane's data class, not just labelled ──
+        # DATA_CLASS was computed and reported in serverInfo and then never
+        # consulted, so a Fireworks/DeepSeek pane carried search_notes and
+        # read_note over ~/notes -- and neither is in RISKY, so neither ever
+        # raised a card. Found by the 2026-09-11 bug bash (grok, CONFIRMED).
+        # Under it sat a second defect: _data_class_for passed has_tools=True
+        # to merit_policy.eligible, which is a routing-QUALITY opinion, and it
+        # demoted the SOVEREIGN local lane to `internal`. Both are asserted
+        # here, because fixing either alone gives a wrong answer.
+        import acp_server as _srv
+        ok(_srv._data_class_for("local") == "sensitive",
+           "the sovereign local lane keeps a sensitive ceiling (a tool-quality "
+           "opinion must not demote it)")
+        for _third in ("fireworks", "deepseek"):
+            ok(_srv._data_class_for(_third) == "internal",
+               f"{_third} is capped at internal — third party (P11)")
+        ok(_srv._data_class_for("no-such-provider") == "internal",
+           "an unknown provider fails closed to internal")
+
+        # The gate itself, without standing a server up: _vault_tools consults
+        # the module-level DATA_CLASS, so assert on both settings of it.
+        _real = _srv.DATA_CLASS
+        try:
+            _srv.DATA_CLASS = "internal"
+            ok(_srv.Server._vault_tools(None) == [],
+               "an internal-ceiling lane gets NO vault reader")
+            _srv.DATA_CLASS = "sensitive"
+            ok(isinstance(_srv.Server._vault_tools(None), list),
+               "a sensitive-ceiling lane can build its vault tools")
+        finally:
+            _srv.DATA_CLASS = _real
+
     print()
     if FAILS:
         print("ACP SELFTEST FAIL — %d failing" % len(FAILS))

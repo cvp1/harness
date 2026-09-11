@@ -91,7 +91,21 @@ def _data_class_for(target):
     """
     try:
         from _lib import merit_policy
-        return ("sensitive" if merit_policy.eligible(target, "sensitive", True)
+        # has_tools=False ON PURPOSE. eligible() answers two questions at once:
+        # "may this data class reach this provider" (the trust axis) and "is
+        # this provider any good at driving tools" (a routing-QUALITY opinion
+        # about a raw API call). Only the first is a data-class ceiling's
+        # business. Passing True silently demoted `local` -- the SOVEREIGN lane,
+        # Ollama on Craig's own hardware, the one that still answers when the
+        # WAN is down -- from sensitive to internal, killing it with a quality
+        # opinion about a different code path. Measured 2026-09-11:
+        # eligible("local", "sensitive", True) is False and
+        # eligible("local", "sensitive", False) is True.
+        #
+        # roles.py hit this exact conflation on 2026-09-10 and carries the same
+        # note (roles._data_class_ok). This copy never got it -- the second
+        # authority that drifted from the first.
+        return ("sensitive" if merit_policy.eligible(target, "sensitive", False)
                 else "internal")
     except Exception:  # noqa: BLE001 — unreadable taxonomy => the closed answer
         return "internal"
@@ -295,6 +309,27 @@ class Server:
 
     # ── tools ─────────────────────────────────────────────────────────────
     def _vault_tools(self):
+        """The vault reader — attached ONLY on a lane that may hold the vault.
+
+        `~/notes` is Craig's own writing: the ranch, the family, the money, the
+        client-adjacent thinking. A lane whose ceiling is `internal` may not
+        carry it (P11), and until 2026-09-11 the ceiling was COMPUTED (line ~183)
+        and REPORTED in serverInfo.dataClass and then not consulted here, so
+        DATA_CLASS was a label rather than a gate.
+
+        The reachable path, found by the 2026-09-11 bug bash (grok, CONFIRMED,
+        re-read here): Library -> a vault note -> agent = Fireworks or DeepSeek
+        -> "Open agent here". The pane's cwd is ~/notes, the opening prompt
+        tells the model to read the file, and neither `search_notes` nor
+        `read_note` is in RISKY -- so no permission card is ever raised and the
+        bytes go to a third party. Roles could not save it: the data-class gate
+        lives in roles.py and this path starts without a role.
+
+        Fails closed with the rest: an unreadable taxonomy already resolves
+        DATA_CLASS to `internal`, so it resolves to NO vault tools here.
+        """
+        if DATA_CLASS != "sensitive":
+            return []
         try:
             import importlib.util
             p = Path(__file__).resolve().parent.parent / "wiki" / "ask_local.py"
