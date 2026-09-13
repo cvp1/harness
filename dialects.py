@@ -151,7 +151,14 @@ def decode(body):
     every dialect — see the module docstring for why.
     """
     msg = message_of(body)
-    thinking = msg.get("thinking") or ""
+    # ``thinking`` is Ollama's spelling; ``reasoning_content`` is the
+    # OpenAI-compatible one that hosted reasoning models use (Fireworks GLM /
+    # DeepSeek / Kimi, measured 2026-09-13). Reading only the first made a
+    # model that spent its entire token budget reasoning look like it had
+    # returned a legitimate empty answer — the reasoning was invisible to the
+    # loop, so nothing could tell the two apart. Surfaced, never salvaged:
+    # we do not mine an answer out of chain-of-thought.
+    thinking = msg.get("thinking") or msg.get("reasoning_content") or ""
     content = strip_think(msg.get("content") or "")
 
     # Rung 1 — native tool_calls field.

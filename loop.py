@@ -238,6 +238,15 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
         decoded = dialects.decode(body)
         if not decoded.calls:
             meta["wall_s"] = time.monotonic() - t0
+            # An empty final answer is ALWAYS a failure here, never a result.
+            # A reasoning model that burns its whole token budget thinking
+            # returns empty content with a normal stop reason, which is
+            # indistinguishable from a real answer unless we check (measured
+            # 2026-09-13: glm-5p3 spent 19,651 reasoning tokens and returned
+            # 0 chars, and the caller got "" as success). Degrade toward
+            # safety — say what happened instead of handing back silence.
+            if not decoded.text.strip():
+                raise HarnessError(_empty_answer_why(decoded, usage), meta)
             return decoded.text, meta
 
         # Record the assistant turn as the model produced it, then execute.
@@ -268,6 +277,24 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
     meta["wall_s"] = time.monotonic() - t0
     raise HarnessError("turn budget %d exhausted without a final answer"
                        % max_turns, meta)
+
+
+def _empty_answer_why(decoded, usage):
+    """Diagnose an empty final answer so the caller sees the cause, not silence.
+
+    The common cause is a reasoning model whose chain-of-thought consumed the
+    completion budget, leaving no room for the answer. That is a budget
+    problem with a concrete fix (raise ``num_predict``/``max_tokens``), so say
+    so rather than reporting a generic empty reply.
+    """
+    detail = usage.get("completion_tokens_details") or {}
+    reasoning_tokens = detail.get("reasoning_tokens") or 0
+    if reasoning_tokens or decoded.thinking:
+        return ("model returned no answer — it spent the completion budget "
+                "reasoning (%s reasoning tokens, %d chars of reasoning kept). "
+                "Raise num_predict/max_tokens for this model."
+                % (reasoning_tokens or "unreported", len(decoded.thinking)))
+    return "model returned an empty answer with no tool call and no reasoning"
 
 
 def _gate_ok(gate, name, args, meta):

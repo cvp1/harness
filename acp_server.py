@@ -167,6 +167,10 @@ PROVIDERS = {
         "transport": lambda: None,     # loop.run's own /api/chat default
         "target": "local",             # merit_policy key -> sovereign
         "where": "on the node",        # phrasing for the unknown-model refusal
+        # loop.run's 180s default is sized for a local POST ("cold load ~20s").
+        # Keep it: a local model silent for ten minutes is a real failure, and
+        # masking it with a long timeout is the wrong direction.
+        "call_timeout": None,
     },
     "fireworks": {
         "label": "Fireworks.ai",
@@ -175,6 +179,12 @@ PROVIDERS = {
         "transport": _fireworks_transport,
         "target": "fireworks",         # merit_policy key -> THIRD party
         "where": "on Fireworks",
+        # HOSTED REASONING MODELS ARE SLOW BY DESIGN. glm-5p3 measured
+        # 2026-09-13 at ~280s to produce 22,740 completion tokens (19,651 of
+        # them reasoning). The 180s local default cut that off mid-generation,
+        # turning the raised token ceiling into a timeout instead of an answer.
+        # Sized to the token budget, not to a local node's cold load.
+        "call_timeout": 900,
     },
     "deepseek": {
         # DeepSeek at DIRECT prices (2026-09-09): the same model costs ~2x
@@ -185,6 +195,8 @@ PROVIDERS = {
         "transport": _deepseek_transport,
         "target": "deepseek",          # merit_policy key -> THIRD party
         "where": "on DeepSeek",
+        # Same reason as Fireworks: V4 is hybrid-thinking and bills the CoT.
+        "call_timeout": 900,
     },
 }
 if PROVIDER not in PROVIDERS:
@@ -539,7 +551,9 @@ class Server:
                 answer, meta = hloop.run(
                     text, self._tools_for(sess), model=sess["model"],
                     system=SYSTEM % sess["cwd"], history=list(sess["history"]),
-                    should_stop=sess["cancel"].is_set, transport=transport)
+                    should_stop=sess["cancel"].is_set, transport=transport,
+                    call_timeout=(SPEC.get("call_timeout")
+                                  or hloop.DEFAULT_CALL_TIMEOUT))
             except hloop.HarnessError as e:
                 stop = ("cancelled" if sess["cancel"].is_set() else "refusal")
                 if stop == "refusal":

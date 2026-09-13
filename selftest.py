@@ -9,9 +9,11 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from harness import dialects, registry, loop, tools_local
+    from harness import (dialects, registry, loop, tools_local,
+                         fireworks_transport)
 else:
-    from . import dialects, registry, loop, tools_local
+    from . import (dialects, registry, loop, tools_local,
+                   fireworks_transport)
 
 FAILS = []
 
@@ -257,6 +259,66 @@ def test_loop():
        "loop: OpenAI call id paired, assistant turn recorded from choices")
 
 
+# -------------------------------------------------- empty-answer / reasoning ---
+def test_empty_answer_fails_loud():
+    """A reasoning model that spends its budget must not look like success.
+
+    Regression for the 2026-09-13 silent-wrong-result: glm-5p3 on the Fireworks
+    lane burned 19,651 reasoning tokens, returned empty content with a normal
+    stop reason, and ``loop.run`` handed the caller "" as a final answer.
+    """
+    echo = loop.Tool("echo", "echo", {"type": "object", "properties": {}},
+                     lambda a: "x")
+
+    # 1. decode() must SEE OpenAI-style reasoning, not just Ollama's spelling.
+    d = dialects.decode({"choices": [{"message": {
+        "role": "assistant", "content": "",
+        "reasoning_content": "thinking hard about it"}}]})
+    ok(d.thinking == "thinking hard about it" and d.text == ""
+       and not d.calls, "empty: decode surfaces reasoning_content")
+
+    # 2. Budget spent reasoning -> loud error naming the cause and the fix.
+    transport, _ = _scripted_transport([
+        {"choices": [{"message": {"role": "assistant", "content": "",
+                                  "reasoning_content": "a" * 40}}],
+         "usage": {"completion_tokens": 19651,
+                   "completion_tokens_details": {"reasoning_tokens": 19651}}}])
+    try:
+        loop.run("q", [echo], model="glm-5p3", transport=transport)
+        ok(False, "empty: reasoning-starved run raises")
+    except loop.HarnessError as e:
+        msg = str(e)
+        ok("19651" in msg and "max_tokens" in msg,
+           "empty: reasoning-starved run raises, naming tokens and the fix")
+
+    # 3. Plain empty answer (no reasoning at all) still refuses, different why.
+    transport, _ = _scripted_transport([body("")])
+    try:
+        loop.run("q", [echo], model="gemma4-e4b-agent-64k", transport=transport)
+        ok(False, "empty: bare empty answer raises")
+    except loop.HarnessError as e:
+        ok("empty answer" in str(e), "empty: bare empty answer raises")
+
+    # 4. Whitespace-only is empty too — the guard must not be fooled by "\n".
+    transport, _ = _scripted_transport([body("   \n  ")])
+    try:
+        loop.run("q", [echo], model="gemma4-e4b-agent-64k", transport=transport)
+        ok(False, "empty: whitespace-only answer raises")
+    except loop.HarnessError:
+        ok(True, "empty: whitespace-only answer raises")
+
+    # 5. A REAL answer still returns normally — the guard must not overreach.
+    transport, _ = _scripted_transport([body("the actual answer")])
+    answer, _meta = loop.run("q", [echo], model="gemma4-e4b-agent-64k",
+                             transport=transport)
+    ok(answer == "the actual answer", "empty: a real answer still returns")
+
+    # 6. Fireworks default ceiling must clear a measured reasoning run.
+    b = fireworks_transport.to_openai_body({"model": "glm-5p3", "messages": []})
+    ok(b["max_tokens"] >= 22740,
+       "empty: fireworks default clears glm-5p3's measured 22,740-token run")
+
+
 # ------------------------------------------------------------- tools_local ---
 def test_tools_local():
     with tempfile.TemporaryDirectory() as td:
@@ -315,6 +377,7 @@ def test_gate_scoring():
 
 def main():
     for fn in (test_decoder, test_encoder, test_registry, test_loop,
+               test_empty_answer_fails_loud,
                test_tools_local, test_gate_scoring):
         print("--- %s ---" % fn.__name__)
         fn()

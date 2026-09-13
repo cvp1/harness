@@ -70,7 +70,17 @@ _OPTION_MAP = {"num_predict": "max_tokens", "temperature": "temperature",
                "top_p": "top_p", "seed": "seed", "stop": "stop"}
 # num_predict -1 means "unbounded" to Ollama; OpenAI-shaped APIs reject it.
 _UNBOUNDED = (-1, -2)
-DEFAULT_MAX_TOKENS = 4096
+# Sized for REASONING models, which spend the budget before they write a word:
+# glm-5p3 measured 2026-09-13 at 19,651 reasoning tokens + ~3,000 of answer on a
+# 10 KB research prompt (22,740 completion total). At the old 4096 it returned
+# EMPTY content with a normal stop reason on every substantive prompt — the same
+# failure ``deepseek_transport`` documents ("CoT can eat the whole max_tokens and
+# return empty content", 2026-07-08), but unfixable there by disabling thinking
+# because Fireworks accepts no "reasoning off" value. This is a CEILING, not a
+# target: a model that does not think long does not bill more for the headroom.
+# ``loop.py`` now refuses an empty answer outright, so a model that still runs
+# out fails loud instead of returning silence.
+DEFAULT_MAX_TOKENS = 32768
 # The ledger's `job` column for calls made through this seam. The seam
 # signature is fixed by loop.run (host, payload, timeout) and carries no job,
 # so it is process-scoped: the ACP server / gate runner set $HARNESS_JOB.
