@@ -37,6 +37,7 @@ Launch (what Corral's AGENTS registry points at):
 """
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -58,6 +59,49 @@ STATE_DIR = Path(os.environ.get(
 PERMISSION_TIMEOUT = 3600      # a human may be away; bounded, then fail closed
 MAX_LINE = 16 * 1024 * 1024    # mirror corral's own stdin bound
 RISKY = {"write_file", "run_bash"}   # tools that need the human's yes
+
+# "Always allow" on run_bash is a PER-COMMAND-PREFIX grant, never the whole
+# tool (Grok 2026-09-16 #9: per-tool allow_always on the ACP pane meant "any
+# single-line command for the rest of the session"). The native Claude Code
+# idiom — "don't ask again for `wc` commands this session" — and the same
+# shape: a grant names the program(s) a command runs; a compound command is
+# auto-allowed only when EVERY segment's program is granted. No grant is
+# offered at all where a prefix would be a lie: wrappers whose real program
+# is an argument (sudo, bash -c, env, xargs …), substitutions, redirections
+# (a write without the diff card). Those get allow-once/reject only.
+_BASH_WRAPPERS = frozenset((
+    "sudo", "doas", "env", "bash", "sh", "zsh", "dash", "ksh", "xargs",
+    "nohup", "time", "timeout", "nice", "ionice", "command", "builtin",
+    "exec", "eval", "source", ".", "watch", "find", "script", "su",
+    "python", "python3", "perl", "ruby", "node",   # `-c`/`-e` run anything
+))
+_BASH_NO_GRANT = re.compile(r"[`<>\n]|\$\(|\$\{|\(")
+_BASH_SEGMENT = re.compile(r"\|\|?|&&?|;")
+_BASH_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def bash_prefixes(cmd):
+    """The program names a command runs, as a frozenset — or ``None`` when no
+    prefix grant is honest for it (then the card offers allow-once only)."""
+    if not isinstance(cmd, str) or not cmd.strip():
+        return None
+    if _BASH_NO_GRANT.search(cmd):
+        return None
+    out = set()
+    for seg in _BASH_SEGMENT.split(cmd):
+        words = seg.split()
+        while words and _BASH_ASSIGN.match(words[0]):
+            words.pop(0)
+        if not words:
+            return None                      # empty segment: `a;` / `| b`
+        prog = words[0]
+        base = prog.rsplit("/", 1)[-1]
+        if base in _BASH_WRAPPERS or base != prog and ".." in prog:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9_./+-]+", prog):
+            return None
+        out.add(prog)
+    return frozenset(out)
 MAX_HISTORY_MSGS = 200         # per session; oldest turns dropped beyond this
 
 SYSTEM = ("You are a capable local agent working inside the directory %s. "
@@ -228,6 +272,13 @@ def _fake_transport(kind):
                 {"function": {"name": "write_file",
                               "arguments": {"path": "fake.txt", "content": "hi"}}}]},
                 "eval_count": 1}
+        # "bash": each user prompt IS the command to run — the selftest drives
+        # the per-prefix allow_always grant with a sequence of real commands.
+        if kind == "bash" and last.get("role") == "user":
+            return {"message": {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "run_bash",
+                              "arguments": {"command": last.get("content", "")}}}]},
+                "eval_count": 1}
         if last.get("role") == "tool":
             return {"message": {"role": "assistant",
                                 "content": "tool said: %s" % last.get("content", "")[:80]},
@@ -386,21 +437,39 @@ class Server:
     _KINDS = {"write_file": "edit", "run_bash": "execute", "read_file": "read",
               "list_dir": "read", "search_notes": "search", "read_note": "read"}
 
+    @staticmethod
+    def _grant_keys(tool_name, args):
+        """What an "always allow" on this call would grant, as a set of keys —
+        or ``None`` when no standing grant is offered for it. run_bash grants
+        per program prefix (``bash_prefixes``); every other risky tool grants
+        the tool."""
+        if tool_name != "run_bash":
+            return frozenset((tool_name,))
+        prefixes = bash_prefixes((args or {}).get("command"))
+        if prefixes is None:
+            return None
+        return frozenset(("run_bash", p) for p in prefixes)
+
     def _permission(self, sess, tool_name, args, tc):
         """True iff the human allows this call. Absence of a yes is a no."""
-        if tool_name in sess["allow_always"]:
+        keys = self._grant_keys(tool_name, args)
+        if keys is not None and keys <= sess["allow_always"]:
             return True
-        params = {
-            "sessionId": sess["sessionId"],
-            "options": [
-                {"kind": "allow_once", "name": "Allow", "optionId": "allow"},
-                {"kind": "allow_always",
-                 "name": "Always allow %s" % tool_name,
-                 "optionId": "allow_always"},
-                {"kind": "reject_once", "name": "Reject", "optionId": "reject"},
-            ],
-            "toolCall": tc,
-        }
+        options = [
+            {"kind": "allow_once", "name": "Allow", "optionId": "allow"}]
+        if keys is not None:
+            if tool_name == "run_bash":
+                progs = sorted(k[1] for k in keys)
+                label = "Always allow %s commands" % ", ".join(
+                    "`%s`" % p for p in progs)
+            else:
+                label = "Always allow %s" % tool_name
+            options.append({"kind": "allow_always", "name": label,
+                            "optionId": "allow_always"})
+        options.append(
+            {"kind": "reject_once", "name": "Reject", "optionId": "reject"})
+        params = {"sessionId": sess["sessionId"], "options": options,
+                  "toolCall": tc}
         r = self._request("session/request_permission", params,
                           PERMISSION_TIMEOUT)
         outcome = ((r or {}).get("outcome") or {})
@@ -408,7 +477,9 @@ class Server:
             return False                       # cancelled / timeout / malformed
         opt = outcome.get("optionId")
         if opt == "allow_always":
-            sess["allow_always"].add(tool_name)
+            if keys is None:
+                return False   # option was never offered: a forged answer is a no
+            sess["allow_always"] |= keys
             return True
         return opt in ("allow", "allow_once")
 
