@@ -130,6 +130,21 @@ execution (the Progent pattern; `_lib/policy_gate.check` composes directly).
 A denial is enforced (tool does not run), recorded in `meta["denied"]`, and
 reported to the model — never silent. A gate that *crashes* fails CLOSED.
 
+**Default-on since 2026-09-16** (`policy.py`). `gate=None` is `policy.DEFAULT`,
+not "no gate" — before this, eight of nine in-workspace callers passed nothing
+and ran unscreened; the seam was right and the composition was optional, so
+the control covered one job (`observability/ranch_diag.py`). The default:
+built-in textual policy for `read_file`/`write_file`/`list_dir` (independent
+of `tools_local._confine`, which resolves); `run_bash` DENIED until the caller
+declares a `policy.bash_policy(allow=[...])` allowlist or the named
+`policy.BASH_ANY` sentinel for a human-driven lane (shape checks still run);
+any tool nobody declared DENIED — via `_lib.policy_gate.check` when the spine
+is importable, outright when it is not. A caller's own tools are declared with
+`policy.gate({"name": predicate})`; a declaration that would *replace* a
+built-in policy is a `ValueError` at construction, not a surprise at call time.
+Proof: `selftest.test_policy` — its first check is a `loop.run` with no gate
+argument whose undeclared tool is denied.
+
 ## 6. Honest scope
 
 * **Local models, local tools.** No cloud MCP reach — same lane boundary as
@@ -137,7 +152,9 @@ reported to the model — never silent. A gate that *crashes* fails CLOSED.
 * **fs tools are jailed** to the workdir (resolve-inside-or-refuse; selftested
   against `../` and absolute escapes). **`run_bash` is bounded, not jailed** —
   bash can address anything the user can. That is deliberate for the trusted
-  cron lane; callers wanting hard limits pass a `gate` or `--no-bash`.
+  cron lane; since 2026-09-16 the gate denies it by default, so a lane that
+  wants bash says so — an allowlist for an unattended job, `BASH_ANY` for a
+  human at the keyboard (§5).
 * **No scheduling, no routing.** The scheduler stays outside (systemd timers);
   provider choice stays in `_lib/route`/`model_router`. This is the executor.
 * **stdlib-only** (urllib + json + subprocess), runs under bare

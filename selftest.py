@@ -9,13 +9,18 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from harness import (dialects, registry, loop, tools_local,
+    from harness import (dialects, registry, loop, policy, tools_local,
                          fireworks_transport)
 else:
-    from . import (dialects, registry, loop, tools_local,
+    from . import (dialects, registry, loop, policy, tools_local,
                    fireworks_transport)
 
 FAILS = []
+
+# The loop tests use synthetic tools (echo, bomb, big…) that no policy knows;
+# they pass an explicit permissive gate so they test the LOOP. That the
+# default denies them is test_policy's business, not theirs.
+_ALLOW = lambda n, a: (True, "ok")  # noqa: E731
 
 
 def ok(cond, label):
@@ -161,7 +166,7 @@ def test_loop():
                                        "arguments": {"text": "hi"}}}]),
         body("final: hi")])
     answer, meta = loop.run("say hi via echo", [echo], model="gemma4-e4b-agent-64k",
-                            transport=transport)
+                            transport=transport, gate=_ALLOW)
     ok(answer == "final: hi" and meta["turns"] == 2
        and meta["tool_calls"] == [("echo", "ok")], "loop: tool turn then answer")
     ok(sent[1]["messages"][-1]["role"] == "tool"
@@ -173,14 +178,14 @@ def test_loop():
     transport, _ = _scripted_transport([
         body(tool_calls=[{"function": {"name": "nope", "arguments": {}}}]),
         body("gave up")])
-    answer, meta = loop.run("t", [echo], model="m", transport=transport)
+    answer, meta = loop.run("t", [echo], model="m", transport=transport, gate=_ALLOW)
     ok(meta["tool_calls"] == [("nope", "unknown")], "loop: unknown tool survives")
     # Tool exception is fed back, not fatal.
     bomb = loop.Tool("bomb", "always fails", {}, lambda a: 1 / 0)
     transport, sent = _scripted_transport([
         body(tool_calls=[{"function": {"name": "bomb", "arguments": {}}}]),
         body("ok")])
-    _, meta = loop.run("t", [bomb], model="m", transport=transport)
+    _, meta = loop.run("t", [bomb], model="m", transport=transport, gate=_ALLOW)
     ok(meta["tool_calls"] == [("bomb", "error")]
        and "ZeroDivisionError" in sent[1]["messages"][-1]["content"],
        "loop: tool error fed back")
@@ -189,7 +194,7 @@ def test_loop():
         body(tool_calls=[{"function": {"name": "echo",
                                        "arguments": {"text": "again"}}}])])
     try:
-        loop.run("t", [echo], model="m", transport=transport, max_turns=3)
+        loop.run("t", [echo], model="m", transport=transport, max_turns=3, gate=_ALLOW)
         ok(False, "loop: turn budget refuses")
     except loop.HarnessError as e:
         ok(e.meta.get("turns") == 3, "loop: turn budget refuses")
@@ -221,7 +226,7 @@ def test_loop():
         body('```tool_call\n{"name": "echo", "args": {"text": "p"}}\n```'),
         body("prompted done")])
     answer, meta = loop.run("t", [echo], model="deepseek-r1:8b",
-                            transport=transport)
+                            transport=transport, gate=_ALLOW)
     ok(meta["dialect"] == "prompted" and sent[0].get("tools") is None
        and sent[1]["messages"][-1]["role"] == "user" and answer == "prompted done",
        "loop: prompted dialect end-to-end")
@@ -230,7 +235,7 @@ def test_loop():
     transport, sent = _scripted_transport([
         body(tool_calls=[{"function": {"name": "big", "arguments": {}}}]),
         body("d")])
-    loop.run("t", [big], model="m", transport=transport)
+    loop.run("t", [big], model="m", transport=transport, gate=_ALLOW)
     ok("…[truncated 500 chars]" in sent[1]["messages"][-1]["content"],
        "loop: tool result truncated with marker")
     # OpenAI-compatible transport end-to-end: usage counted, evidence kept,
@@ -247,7 +252,7 @@ def test_loop():
                                           "content": "shim done"}}],
                  "usage": {"prompt_tokens": 60, "completion_tokens": 4}}
     transport, sent = _scripted_transport([oai_call, oai_final])
-    answer, meta = loop.run("t", [echo], model="m", transport=transport)
+    answer, meta = loop.run("t", [echo], model="m", transport=transport, gate=_ALLOW)
     ok(answer == "shim done" and meta["eval_count"] == 11
        and meta["prompt_eval_count"] == 100,
        "loop: OpenAI-shape usage accounted")
@@ -284,7 +289,7 @@ def test_empty_answer_fails_loud():
          "usage": {"completion_tokens": 19651,
                    "completion_tokens_details": {"reasoning_tokens": 19651}}}])
     try:
-        loop.run("q", [echo], model="glm-5p3", transport=transport)
+        loop.run("q", [echo], model="glm-5p3", transport=transport, gate=_ALLOW)
         ok(False, "empty: reasoning-starved run raises")
     except loop.HarnessError as e:
         msg = str(e)
@@ -294,7 +299,7 @@ def test_empty_answer_fails_loud():
     # 3. Plain empty answer (no reasoning at all) still refuses, different why.
     transport, _ = _scripted_transport([body("")])
     try:
-        loop.run("q", [echo], model="gemma4-e4b-agent-64k", transport=transport)
+        loop.run("q", [echo], model="gemma4-e4b-agent-64k", transport=transport, gate=_ALLOW)
         ok(False, "empty: bare empty answer raises")
     except loop.HarnessError as e:
         ok("empty answer" in str(e), "empty: bare empty answer raises")
@@ -302,7 +307,7 @@ def test_empty_answer_fails_loud():
     # 4. Whitespace-only is empty too — the guard must not be fooled by "\n".
     transport, _ = _scripted_transport([body("   \n  ")])
     try:
-        loop.run("q", [echo], model="gemma4-e4b-agent-64k", transport=transport)
+        loop.run("q", [echo], model="gemma4-e4b-agent-64k", transport=transport, gate=_ALLOW)
         ok(False, "empty: whitespace-only answer raises")
     except loop.HarnessError:
         ok(True, "empty: whitespace-only answer raises")
@@ -310,7 +315,7 @@ def test_empty_answer_fails_loud():
     # 5. A REAL answer still returns normally — the guard must not overreach.
     transport, _ = _scripted_transport([body("the actual answer")])
     answer, _meta = loop.run("q", [echo], model="gemma4-e4b-agent-64k",
-                             transport=transport)
+                             transport=transport, gate=_ALLOW)
     ok(answer == "the actual answer", "empty: a real answer still returns")
 
     # 6. Fireworks default ceiling must clear a measured reasoning run.
@@ -375,10 +380,145 @@ def test_gate_scoring():
            "gate: unfaithful count FAILs that check only")
 
 
+# ------------------------------------------------------------------ policy ---
+def test_policy():
+    # THE SEAM: loop.run with NO gate argument denies a tool nobody declared.
+    # Before 2026-09-16 this call ran the tool. Everything else in this block
+    # is detail; this one line is what closes the hole.
+    hits = []
+    stray = loop.Tool("stray", "undeclared", {}, lambda a: hits.append(1) or "ran")
+    transport, sent = _scripted_transport([
+        body(tool_calls=[{"function": {"name": "stray", "arguments": {}}}]),
+        body("d")])
+    _, meta = loop.run("t", [stray], model="m", transport=transport)
+    ok(not hits and meta["tool_calls"] == [("stray", "denied")]
+       and "DENIED" in sent[1]["messages"][-1]["content"],
+       "policy: SEAM — no gate argument still denies an undeclared tool")
+
+    g = policy.DEFAULT
+    # Built-in fs policy: clean relative paths pass; escapes and control
+    # characters are refused BEFORE tools_local._confine ever sees them.
+    ok(g("read_file", {"path": "a/b.txt"})[0], "policy: read_file relative ok")
+    ok(g("list_dir", {})[0], "policy: list_dir default path ok")
+    ok(not g("read_file", {"path": "/etc/passwd"})[0], "policy: absolute denied")
+    ok(not g("read_file", {"path": "../x"})[0], "policy: .. segment denied")
+    ok(not g("read_file", {"path": "a\x00b"})[0], "policy: NUL denied")
+    ok(not g("read_file", {})[0], "policy: read_file path required")
+    ok(g("write_file", {"path": "o.txt", "content": "x"})[0], "policy: write ok")
+    ok(not g("write_file", {"path": "o.txt", "content": 5})[0],
+       "policy: write non-str content denied")
+    ok(not g("write_file", {"path": "o.txt",
+                            "content": "x" * (policy.MAX_WRITE_CHARS + 1)})[0],
+       "policy: write content cap")
+    # run_bash: denied by DEFAULT, allowed only through bash_policy.
+    ok(not g("run_bash", {"command": "ls"})[0], "policy: bash denied by default")
+    ok(not g("no_such_tool", {})[0], "policy: unknown tool denied")
+
+    bp = policy.bash_policy([r"^wc -l \S+$"], hint="count lines only")
+    gb = policy.gate({"run_bash": bp})
+    ok(gb("run_bash", {"command": "wc  -l data.txt"})[0], "policy: allowlist hit")
+    r = gb("run_bash", {"command": "rm -rf /"})
+    ok(not r[0] and "count lines only" in r[1], "policy: allowlist miss carries hint")
+    ok(not gb("run_bash", {"command": "wc -l a\nrm -rf /"})[0],
+       "policy: multi-line bash denied")
+    ok(not gb("run_bash", {"command": "x" * (policy.MAX_BASH_CHARS + 1)})[0],
+       "policy: bash length cap")
+    ok(not gb("run_bash", {"command": "   "})[0], "policy: empty bash denied")
+    ga = policy.gate({"run_bash": policy.bash_policy(policy.BASH_ANY)})
+    ok(ga("run_bash", {"command": "ls -la"})[0], "policy: BASH_ANY allows")
+    ok(not ga("run_bash", {"command": "ls\nrm x"})[0],
+       "policy: BASH_ANY still shape-checks")
+    # Grok review 2026-09-16: `match` was start-anchored and `\S+` swallowed
+    # metacharacters. fullmatch + shell-syntax refusal, unless opted in.
+    gnoanchor = policy.gate({"run_bash": policy.bash_policy([r"wc -l \S+"])})
+    for cmd in ("wc -l data.txt; rm -rf /", "wc -l data.txt;id", "wc -l data.txt|bash",
+                "wc -l data.txt&&id", "wc -l $(id)", "wc -l `id`", "wc -l data.txt`id`",
+                "wc -l a > b", "wc -l < a"):
+        ok(not gnoanchor("run_bash", {"command": cmd})[0],
+           "policy: allowlist-shaped injection denied: %s" % cmd)
+    ok(gnoanchor("run_bash", {"command": "wc -l data.txt"})[0],
+       "policy: plain allowlist hit still allowed")
+    gsyn = policy.gate({"run_bash": policy.bash_policy(
+        [r"cat [\w./-]+ \| wc -l"], shell_syntax=True)})
+    ok(gsyn("run_bash", {"command": "cat a.txt | wc -l"})[0],
+       "policy: shell_syntax=True admits a spelled-out pipe")
+    ok(not gsyn("run_bash", {"command": "cat a.txt | wc -l; id"})[0],
+       "policy: shell_syntax=True is still a fullmatch")
+    ok(not policy.DEFAULT("read_file", {"path": "a\\..\\b"})[0], "policy: backslash denied")
+    ok(not policy.DEFAULT("read_file", {"path": "C:x"})[0], "policy: drive letter denied")
+    ok(not policy.DEFAULT("read_file", {"path": " a.txt"})[0], "policy: padded path denied")
+    ok(not policy.DEFAULT("read_file", {"path": "a b"})[0], "policy: U+2028 denied")
+    ok(not policy.DEFAULT("read_file", {"path": "foo/./../../x"})[0],
+       "policy: normalised climb denied")
+    ok(not policy.gate({"n": policy.relative_path()})("n", {"path": "/etc/passwd"})[0],
+       "policy: relative_path helper denies absolute")
+    gm = policy.gate({"s": policy.string_args(required=("pattern",),
+                                              match={"pattern": r"[a-z]+"})})
+    ok(not gm("s", {"pattern": "-f/tmp/x"})[0], "policy: match= refuses option-shaped arg")
+    ok(gm("s", {"pattern": "solar"})[0], "policy: match= admits the shape")
+    try:
+        policy._BUILTIN["run_bash"] = lambda a: (True, "")
+        ok(False, "policy: built-in table is read-only")
+    except TypeError:
+        ok(True, "policy: built-in table is read-only")
+    # Astra review 2026-09-16.
+    ok(not policy.DEFAULT("list_dir", {"path": "\n" * 5000})[0],
+       "policy: control-only path is not 'no path'")
+    for p in ("harness/policy.py", "sub/_lib/mail.py", ".git/hooks/pre-commit",
+              "a/../harness/x"):
+        ok(not policy.DEFAULT("write_file", {"path": p, "content": "x"})[0],
+           "policy: write_file refuses the trust anchor: %s" % p)
+    ok(policy.DEFAULT("write_file", {"path": "notes/harnessed.md", "content": "x"})[0],
+       "policy: write_file segment rule is exact, not substring")
+    ok(not gnoanchor("run_bash", {"command": "wc -l data.txt"})[0],
+       "policy: NBSP in a command denied")
+    ok(gnoanchor("run_bash", {"command": "wc   -l   data.txt"})[0],
+       "policy: ASCII space runs normalised")
+    ok(not gnoanchor("run_bash", {"command": "wc\t-l data.txt"})[0],
+       "policy: tab is a control character, denied like any other")
+
+    # Composition is checked when WRITTEN, not when the model calls.
+    def raises(fn):
+        try:
+            fn()
+            return False
+        except ValueError:
+            return True
+    ok(raises(lambda: policy.gate({"read_file": lambda a: (True, "")})),
+       "policy: built-in policy cannot be replaced")
+    ok(raises(lambda: policy.gate({"run_bash": lambda a: (True, "")})),
+       "policy: bash needs bash_policy()")
+    ok(raises(lambda: policy.bash_policy([])), "policy: empty allowlist refused")
+    ok(raises(lambda: policy.gate({"t": "not callable"})),
+       "policy: non-callable declaration refused")
+
+    # Declared tools: closed schema — an extra key is denied.
+    gd = policy.gate({"mark": policy.string_args(required=("token",))})
+    ok(gd("mark", {"token": "7A3"})[0], "policy: declared tool ok")
+    ok(not gd("mark", {})[0], "policy: declared required arg")
+    ok(not gd("mark", {"token": "x", "to": "+1"})[0],
+       "policy: declared tool rejects smuggled key")
+    # A crashing declared rule denies.
+    def boom(a):
+        raise RuntimeError("x")
+    ok(not policy.gate({"b": boom})("b", {})[0], "policy: broken rule denies")
+
+    # In-workspace, unknown tools fall through to the spine's policy.
+    try:
+        from _lib import policy_gate  # noqa: F401
+    except ImportError:
+        print("skip  policy: spine fall-through (standalone, no _lib)")
+    else:
+        ok(g("firealert_send", {"message": "RANCH FIRE ALERT - test"})[0],
+           "policy: spine fall-through allows a clean estate call")
+        ok(not g("firealert_send", {"message": "x", "to": "+1"})[0],
+           "policy: spine fall-through denies recipient injection")
+
+
 def main():
     for fn in (test_decoder, test_encoder, test_registry, test_loop,
                test_empty_answer_fails_loud,
-               test_tools_local, test_gate_scoring):
+               test_tools_local, test_gate_scoring, test_policy):
         print("--- %s ---" % fn.__name__)
         fn()
     print()

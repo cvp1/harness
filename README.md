@@ -28,8 +28,11 @@ HARNESS_MODEL=tag          # default: first non-embedding tag on the node
 ```
 
 ```python
-from harness import Tool, run, run_agentic
+from harness import Tool, run, run_agentic, policy
 answer, meta = run_agentic("summarize the logs in this dir", workdir)
+# bash is DENIED by default; an unattended job declares its allowlist:
+gate = policy.gate({"run_bash": policy.bash_policy([r"^wc -l \S+$"])})
+answer, meta = run_agentic("count the lines", workdir, gate=gate)
 ```
 
 Design, contract (the seam the dogma-2/gpt shims target), bounds, and the

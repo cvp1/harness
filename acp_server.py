@@ -46,9 +46,11 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from harness import loop as hloop
+    from harness import policy as hpolicy
     from harness import tools_local
 else:
     from . import loop as hloop
+    from . import policy as hpolicy
     from . import tools_local
 
 STATE_DIR = Path(os.environ.get(
@@ -348,9 +350,22 @@ class Server:
             spec = importlib.util.spec_from_file_location("wiki_ask_local", p)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
+            self._vault_policies = mod.tool_policies()
             return mod._tools()
         except Exception:  # noqa: BLE001 — standalone installs have no vault
+            self._vault_policies = {}
             return []
+
+    _vault_policies = {}
+
+    def _gate_for(self):
+        """The pane's gate: harness default + bash for a human-driven lane +
+        the vault tools' own declarations (one home: wiki/ask_local). A tool
+        nobody declared is denied — the permission card is the human's yes,
+        this is the schema check that runs regardless of it."""
+        declare = {"run_bash": hpolicy.bash_policy(hpolicy.BASH_ANY)}
+        declare.update(self._vault_policies)
+        return hpolicy.gate(declare)
 
     @staticmethod
     def _title_for(name, args):
@@ -548,12 +563,14 @@ class Server:
             transport = (_fake_transport(self.fake) if self.fake
                          else SPEC["transport"]())
             try:
+                tools = self._tools_for(sess)   # sets _vault_policies first
                 answer, meta = hloop.run(
-                    text, self._tools_for(sess), model=sess["model"],
+                    text, tools, model=sess["model"],
                     system=SYSTEM % sess["cwd"], history=list(sess["history"]),
                     should_stop=sess["cancel"].is_set, transport=transport,
                     call_timeout=(SPEC.get("call_timeout")
-                                  or hloop.DEFAULT_CALL_TIMEOUT))
+                                  or hloop.DEFAULT_CALL_TIMEOUT),
+                    gate=self._gate_for())
             except hloop.HarnessError as e:
                 stop = ("cancelled" if sess["cancel"].is_set() else "refusal")
                 if stop == "refusal":

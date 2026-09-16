@@ -12,12 +12,14 @@ import argparse
 import json
 import sys
 
-from . import dialects, loop, registry, tools_local
+from . import dialects, loop, policy, registry, tools_local
 
 
 def probe(model):
     """One tiny tool task per dialect; report what the model actually does."""
     results = {}
+    # `mark` is this probe's own tool, so this probe declares its policy.
+    probe_gate = policy.gate({"mark": policy.string_args(required=("token",))})
     for dia in dialects.DIALECTS:
         got = {}
         mark = loop.Tool(
@@ -29,7 +31,8 @@ def probe(model):
             answer, meta = loop.run(
                 'Call the tool `mark` with args {"token": "7A3"}. After it '
                 "returns, reply exactly: done.",
-                [mark], model=model, dialect=dia, max_turns=3, call_timeout=180)
+                [mark], model=model, dialect=dia, max_turns=3, call_timeout=180,
+                gate=probe_gate)
             passed = got.get("token") == "7A3"
             results[dia] = {"pass": passed, "turns": meta["turns"],
                             "wall_s": round(meta["wall_s"], 1),
@@ -61,6 +64,10 @@ def main(argv=None):
     ap.add_argument("--timeout", type=int, default=loop.DEFAULT_WALL_BUDGET,
                     help="wall budget seconds")
     ap.add_argument("--no-bash", action="store_true", help="drop run_bash from the set")
+    ap.add_argument("--bash-any", action="store_true",
+                    help="let the model run ANY single-line bash command (default: "
+                         "run_bash is offered but every call is denied — the "
+                         "policy's default; this flag is the greppable opt-in)")
     ap.add_argument("--probe", metavar="MODEL", help="dialect-probe a model")
     ap.add_argument("--gate", metavar="MODEL",
                     help="multi-step agentic gate (mechanical fs scoring)")
@@ -98,6 +105,12 @@ def main(argv=None):
     system = ("You are a capable agent working inside the directory %s. "
               "Use the tools to complete the task, then give a short final "
               "answer stating what you did." % args.workdir)
+    # BASH_ANY is an opt-IN (`--bash-any`), not the CLI's default: there is no
+    # permission card here, so "a human typed the task" is not "a human saw
+    # each command" (Grok review 2026-09-16). Default: bash offered, denied
+    # loudly, the denial names the flag.
+    task_gate = (policy.gate({"run_bash": policy.bash_policy(policy.BASH_ANY)})
+                 if args.bash_any and not args.no_bash else policy.DEFAULT)
 
     def on_event(kind, detail):
         print("  [%s] %s" % (kind, detail), file=sys.stderr)
@@ -106,7 +119,7 @@ def main(argv=None):
         answer, meta = loop.run(args.task, tools, model=args.model,
                                 system=system, dialect=args.dialect,
                                 max_turns=args.max_turns, deadline=args.timeout,
-                                on_event=on_event)
+                                on_event=on_event, gate=task_gate)
     except loop.HarnessError as e:
         print("HARNESS REFUSED: %s" % e, file=sys.stderr)
         if args.json:

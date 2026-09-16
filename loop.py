@@ -23,6 +23,13 @@ Enforcement seam: ``gate`` is a callable ``(tool_name, args) -> (bool, reason)``
 run OUTSIDE the model before every execution (the Progent pattern —
 _lib/policy_gate composes here). A denial is enforced (the tool does not run)
 and reported back to the model so it can adapt; it is never silent.
+``gate=None`` is NOT "no gate" (it was, until 2026-09-16, and eight of nine
+callers left it so): it is ``policy.DEFAULT`` — built-in fs policy, bash
+denied until a caller declares an allowlist, unknown tools denied. An
+*implicit* ungated run does not exist; a permissive policy can still be passed
+explicitly (``gate=lambda n, a: (True, "ok")`` — the selftest does exactly
+that), which is the point: the opt-out is a greppable argument, never an
+omission.
 """
 import json
 import os
@@ -45,9 +52,9 @@ except ImportError:
     local_llm = None
 
 try:
-    from . import dialects, registry
+    from . import dialects, registry, policy
 except ImportError:  # run as a loose script rather than a package
-    import dialects, registry  # noqa: F401
+    import dialects, registry, policy  # noqa: F401
 
 DEFAULT_PORT = 11434
 
@@ -164,6 +171,8 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
     :class:`HarnessError` when a bound refuses or every node fails.
     """
     transport = transport or _default_transport
+    if gate is None:
+        gate = policy.DEFAULT
     host = _resolve_host()
     mdl = _resolve_model(host, model)
     prof = registry.profile_for(mdl)
@@ -262,7 +271,7 @@ def run(task, tools, *, model=None, system=None, dialect=None, options=None,
                 result = ("ERROR: unknown tool %r. Available: %s"
                           % (name, ", ".join(sorted(toolmap))))
                 meta["tool_calls"].append((name, "unknown"))
-            elif gate is not None and not _gate_ok(gate, name, args, meta):
+            elif not _gate_ok(gate, name, args, meta):
                 result = "DENIED by policy: %s" % meta["denied"][-1][1]
             else:
                 try:
