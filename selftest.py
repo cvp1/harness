@@ -520,6 +520,32 @@ def test_policy():
            "policy: spine fall-through allows a clean estate call")
         ok(not g("firealert_send", {"message": "x", "to": "+1"})[0],
            "policy: spine fall-through denies recipient injection")
+        test_connector_tools_fall_through(g)
+
+
+def test_connector_tools_fall_through(g):
+    """A provider connector installs its predicates into _lib/policy_gate, so
+    the harness's default gate enforces them for free — nothing is added HERE.
+
+    That is the claim the connector design makes about `harness/policy.py`
+    ("nothing to add if the registry's predicates install into policy_gate"),
+    and a claim nobody checks is a claim, not a control. A local model driving
+    the harness gets exactly the bounds the tool table declares.
+    """
+    try:
+        import google_connector  # noqa: F401 — the import installs the policies
+    except Exception:            # noqa: BLE001 — connector absent is not a fail
+        ok(True, "policy: connector fall-through SKIPPED (no google_connector)")
+        return
+    ok(not g("google_mail_recent", {"count": 41})[0],
+       "policy: a local model asking for 41 messages is denied by the "
+       "connector's own bound, through the harness's default gate")
+    ok(g("google_mail_recent", {"count": 5})[0],
+       "policy: count=5 passes the same gate and reaches the dispatcher")
+    ok(not g("google_mail_send", {"to": "x@y.io"})[0],
+       "policy: an omitted connector tool is denied by name in the harness too")
+    ok(not g("google_calendar_update", {"id": "a"})[0],
+       "policy: a connector write rule (etag required) holds in the harness")
 
 
 def main():
