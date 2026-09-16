@@ -319,9 +319,16 @@ def test_empty_answer_fails_loud():
     ok(answer == "the actual answer", "empty: a real answer still returns")
 
     # 6. Fireworks default ceiling must clear a measured reasoning run.
-    b = fireworks_transport.to_openai_body({"model": "glm-5p3", "messages": []})
+    #    The ceiling is a harness constant; the namespacing is the spine's.
+    #    Standalone (no _lib) the lane is unavailable by design, so the
+    #    check uses an identity qualify — the assertion is about max_tokens.
+    b = fireworks_transport.to_openai_body({"model": "glm-5p3", "messages": []},
+                                           qualify=lambda m: m)
     ok(b["max_tokens"] >= 22740,
        "empty: fireworks default clears glm-5p3's measured 22,740-token run")
+    ok(fireworks_transport.fireworks_llm is not None
+       or not fireworks_transport.available(),
+       "fireworks: standalone (no _lib) reports unavailable, never tracebacks")
 
 
 # ------------------------------------------------------------- tools_local ---

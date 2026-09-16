@@ -54,7 +54,23 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from _lib import fireworks_llm
+# The spine is optional: harness is a standalone artifact (README: the
+# selftest runs "no network, no _lib"). Without it this lane is simply
+# unavailable — every entry point below says so instead of tracebacking on
+# an import that happened at module load (found 2026-09-16, decision
+# harness-gate-default-on).
+try:
+    from _lib import fireworks_llm
+except ImportError:            # standalone clone — no spine, no lane
+    fireworks_llm = None
+
+_NO_SPINE = "Fireworks lane needs the _lib spine (standalone harness has none)"
+
+
+def _spine():
+    if fireworks_llm is None:
+        raise FireworksTransportError(_NO_SPINE)
+    return fireworks_llm
 
 # Ollama request keys with no OpenAI equivalent. Dropped, never guessed at:
 #   think       — Fireworks has no accepted "off" value (reasoning_effort:"none"
@@ -101,7 +117,7 @@ def to_openai_body(payload, qualify=None):
     Ollama→OpenAI rewrite lives in exactly one place.
     """
     body = {k: v for k, v in payload.items() if k not in _DROP}
-    body["model"] = (qualify or fireworks_llm.qualify)(payload.get("model"))
+    body["model"] = (qualify or _spine().qualify)(payload.get("model"))
     body["stream"] = False
 
     opts = payload.get("options") or {}
@@ -136,7 +152,7 @@ def transport(host, payload, timeout):
     body = to_openai_body(payload)
     data = json.dumps(body).encode("utf-8")
     try:
-        key = fireworks_llm._key()
+        key = _spine()._key()
     except Exception as e:         # noqa: BLE001 — locked vault, missing key
         raise FireworksTransportError("no Fireworks key: %s" % e)
     req = urllib.request.Request(
@@ -168,7 +184,7 @@ def transport(host, payload, timeout):
 
 def available():
     """Is this lane usable at all (key present, vault unlocked)? No spend."""
-    return fireworks_llm.available()
+    return fireworks_llm is not None and fireworks_llm.available()
 
 
 def unavailable_reason():
@@ -181,6 +197,8 @@ def unavailable_reason():
     and one of them is a one-liner Craig runs constantly: an fscrypt vault that
     is simply locked after a reboot is not a missing credential.
     """
+    if fireworks_llm is None:
+        return _NO_SPINE
     from _lib import secrets
     key_file = Path.home() / ".key" / "fireworks.key"
     if os.environ.get("FIREWORKS_API_KEY"):
@@ -197,7 +215,7 @@ def unavailable_reason():
 
 def list_models(**kw):
     """Live model list for the pane's picker — never a hardcoded list."""
-    return fireworks_llm.list_models(**kw)
+    return _spine().list_models(**kw)
 
 
 # --------------------------------------------------------------------------- #
