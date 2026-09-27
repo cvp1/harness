@@ -74,7 +74,17 @@ _BASH_WRAPPERS = frozenset((
     "nohup", "time", "timeout", "nice", "ionice", "command", "builtin",
     "exec", "eval", "source", ".", "watch", "find", "script", "su",
     "python", "python3", "perl", "ruby", "node",   # `-c`/`-e` run anything
+    # Bug bash 2026-09-27 #12: these also run a program named in their
+    # arguments, so a grant on `stdbuf -oL wc` covered `stdbuf bash -c …`.
+    "stdbuf", "setsid", "busybox", "flock", "taskset", "unshare", "strace",
+    "ltrace", "chroot", "nsenter", "chrt", "numactl", "fakeroot", "firejail",
+    "systemd-run", "runuser", "pkexec", "sg", "newgrp", "unbuffer", "rlwrap",
+    "parallel", "gdb", "valgrind", "faketime", "torsocks", "proxychains",
+    "proxychains4", "caffeinate", "arch", "ssh",
 ))
+# A program whose GLOBAL options can name a program to run (`git -c
+# core.pager=…`, `git --exec-path=…`): no prefix grant when they are present.
+_BASH_CONFIG_OPTS = {"git": ("-c", "--config-env", "--exec-path")}
 _BASH_NO_GRANT = re.compile(r"[`<>\n]|\$\(|\$\{|\(")
 _BASH_SEGMENT = re.compile(r"\|\|?|&&?|;")
 _BASH_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
@@ -100,6 +110,13 @@ def bash_prefixes(cmd):
             return None
         if not re.fullmatch(r"[A-Za-z0-9_./+-]+", prog):
             return None
+        risky = _BASH_CONFIG_OPTS.get(base)
+        if risky:
+            for w in words[1:]:
+                if not w.startswith("-"):
+                    break                    # the subcommand: globals end
+                if w.split("=", 1)[0] in risky or w.startswith("-c"):
+                    return None
         out.add(prog)
     return frozenset(out)
 MAX_HISTORY_MSGS = 200         # per session; oldest turns dropped beyond this

@@ -214,7 +214,14 @@ def main():
         p = run("wc -l x | cat")
         ok(len(p) == 1, "prefix: a pipe with one ungranted segment asks")
         for cmd in ("sudo wc -l x", "bash -c 'wc -l x'", "wc -l $(ls)",
-                    "wc -l x > out", "python3 -c 'print(1)'"):
+                    "wc -l x > out", "python3 -c 'print(1)'",
+                    # bug bash 2026-09-27 #12: wrappers whose real program is
+                    # an argument collapsed to the wrapper's name, so a grant
+                    # on `stdbuf -oL wc` covered `stdbuf -oL bash -c …`.
+                    "stdbuf -oL wc -l x", "setsid wc -l x", "busybox wc -l x",
+                    "flock lk wc -l x", "taskset 1 wc -l x", "unshare wc -l x",
+                    "strace -f wc -l x", "chroot d wc -l x",
+                    "git -c core.pager=wc log"):
             p = run(cmd)
             kinds = [o["kind"] for o in p[0]["params"]["options"]] if p else []
             ok(p and "allow_always" not in kinds,

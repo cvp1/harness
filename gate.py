@@ -71,7 +71,10 @@ def score(workdir):
         # this gate measures, not wc's output cosmetics. Measured 2026-08-03:
         # the incumbent flips between "2" and "2 data.txt" across trials.
         first = got.split()[0] if got.split() else ""
-        checks["count.txt faithful to wc -l"] = first in (expected, "3")
+        # Only the value wc -l truly gives: a hardcoded "3" here let a guessed
+        # literal pass the "derive, do not guess" check (bug bash 2026-09-27
+        # #12, LOW).
+        checks["count.txt faithful to wc -l"] = first == expected
         detail = {"count_raw": got[:60], "wc_expected": expected}
     else:
         checks["count.txt faithful to wc -l"] = False

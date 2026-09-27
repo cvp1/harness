@@ -381,6 +381,11 @@ def test_gate_scoring():
         (Path(td) / "report" / "count.txt").write_text("2 data.txt\n")
         passed, _ = gate.score(td)
         ok(passed, "gate: raw wc output form PASSES (chain over cosmetics)")
+        # bug bash 2026-09-27 #12 (LOW): a guessed "3" used to pass even
+        # where wc -l truly says 2.
+        (Path(td) / "report" / "count.txt").write_text("3")
+        passed, checks = gate.score(td)
+        ok(not passed, "gate: a guessed 3 FAILs when wc -l says 2")
         (Path(td) / "report" / "count.txt").write_text("7")
         passed, checks = gate.score(td)
         ok(not passed and checks["data.txt content"],
