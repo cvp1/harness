@@ -50,6 +50,10 @@ try:
     from _lib import local_llm
 except ImportError:
     local_llm = None
+try:
+    from _lib import control_tokens
+except ImportError:  # standalone: no guard available — said once, loudly
+    control_tokens = None
 
 try:
     from . import dialects, registry, policy
@@ -97,8 +101,26 @@ def _endpoint(host):
     return host if ":" in host else "%s:%d" % (host, DEFAULT_PORT)
 
 
+_WARNED = []
+
+
+def _warn_unguarded():
+    if not _WARNED:
+        _WARNED.append(1)
+        print("harness: _lib.control_tokens unavailable (standalone) — tool "
+              "output is sent to the model WITHOUT control-token neutralization",
+              file=sys.stderr)
+
+
 def _default_transport(host, payload, timeout):
     """One non-streaming /api/chat POST. Kept tiny so tests inject a fake."""
+    if control_tokens is not None:
+        # Tool results and fetched text must not forge turns (2026-09-28 P1).
+        payload = dict(payload, messages=control_tokens.neutralize_messages(
+            payload.get("messages") or [], "http://%s" % _endpoint(host),
+            payload.get("model", "")))
+    else:
+        _warn_unguarded()
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         "http://%s/api/chat" % _endpoint(host), data=data,
