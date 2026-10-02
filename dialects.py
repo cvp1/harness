@@ -1,35 +1,12 @@
-"""dialects — the model translation layer (stdlib-only).
+"""dialects — model tool-calling translation: encode per dialect, decode universally.
 
-The one job of this module: make ANY local model's tool-calling work through
-ONE canonical interface, so the agentic loop (``loop.py``) never knows or cares
-which model family it is driving.
-
-Design rule (the core insight, earned the hard way — LOCAL_FLEET.md §4n/§4o,
-mini_gate.py's whole reason to exist):
-
-    **Encode per-model, decode universally.**
-
-* ENCODE is dialect-driven: we present tools the way the model's template wants
-  them — the ``native`` Ollama ``tools=`` param when the template supports it,
-  or a ``prompted`` system-message protocol when it doesn't.
-* DECODE is one tolerant ladder applied to EVERY response regardless of
-  dialect: native ``tool_calls`` → hermes-style ``<tool_call>`` XML → fenced
-  ```` ```tool_call ```` blocks → a bare JSON object. Models drift off their
-  assigned dialect under load; the decoder catches them instead of failing the
-  turn. Every harness-layer false negative we have recorded (hermes /v1
-  parsing, CoT eating num_predict, truncation garble) was a rigid decoder
-  meeting a drifting model.
-
-Canonical shapes (plain dicts — no classes to serialize):
+Encode presents tools as native Ollama ``tools=`` or a prompted system-message
+protocol. Decode applies one tolerant ladder to every reply: native
+``tool_calls`` → ``<tool_call>`` XML → fenced ``tool_call`` block → bare JSON.
 
     ToolSpec  {"name": str, "description": str, "parameters": {json-schema}}
     ToolCall  {"name": str, "args": dict}
     decode(body) -> Decoded(text, calls, thinking)
-
-Repair ladder for JSON-ish payloads (``loads_relaxed``): strict json →
-trailing-comma strip + smart-quote normalization → ``ast.literal_eval`` (safe;
-accepts single-quoted python-dict spellings). Conservative on purpose — we
-repair punctuation, never structure.
 """
 import ast
 import json
@@ -120,12 +97,7 @@ def _normalize_call(obj):
 
 # ------------------------------------------------------------------- decode ---
 def message_of(body):
-    """Lift the assistant message from an Ollama-native OR OpenAI-compatible
-    body (LM Studio / model_shim backends return ``choices[0].message``).
-
-    Seam agreement with dogma-2 (cc-handoff 2026-08-03T011239Z): a transport
-    may return either shape; the decoder normalizes, the loop never branches.
-    """
+    """Return the assistant message from an Ollama-native or OpenAI-compatible body."""
     if "choices" in body:
         choices = body.get("choices") or []
         if choices and isinstance(choices[0], dict):
@@ -147,17 +119,10 @@ def strip_think(content):
 def decode(body):
     """Universal decoder: one Ollama ``/api/chat`` body → Decoded(text, calls).
 
-    ``calls == []`` means the model gave a final answer. Applied identically to
-    every dialect — see the module docstring for why.
+    ``calls == []`` means the model gave a final answer.
     """
     msg = message_of(body)
-    # ``thinking`` is Ollama's spelling; ``reasoning_content`` is the
-    # OpenAI-compatible one that hosted reasoning models use (Fireworks GLM /
-    # DeepSeek / Kimi, measured 2026-09-13). Reading only the first made a
-    # model that spent its entire token budget reasoning look like it had
-    # returned a legitimate empty answer — the reasoning was invisible to the
-    # loop, so nothing could tell the two apart. Surfaced, never salvaged:
-    # we do not mine an answer out of chain-of-thought.
+    # Ollama uses ``thinking``; OpenAI-compatible reasoning models use ``reasoning_content``.
     thinking = msg.get("thinking") or msg.get("reasoning_content") or ""
     content = strip_think(msg.get("content") or "")
 

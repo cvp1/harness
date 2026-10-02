@@ -1,12 +1,7 @@
-"""tools_local — the confined default toolset for the agentic floor (stdlib-only).
+"""tools_local — default toolset for the agentic floor.
 
-Filesystem tools are JAILED to the workdir: every path resolves inside it or
-the call refuses. ``run_bash`` is BOUNDED (cwd=workdir, per-command timeout,
-capped output) but NOT jailed — bash can address any path the user can. That
-is honest scope, not an oversight: the floor's lane is trusted local cron work
-(AGENTIC_FAILOVER_SPEC §2), and callers wanting hard enforcement pass a
-``gate`` to the loop (the Progent seam) or drop bash from the set with
-``standard_tools(workdir, bash=False)``.
+Filesystem tools are jailed to the workdir. ``run_bash`` is bounded (cwd,
+timeout, capped output) but not jailed; enforce with a loop ``gate`` or bash=False.
 """
 import subprocess
 from pathlib import Path

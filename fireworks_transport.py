@@ -1,47 +1,14 @@
-"""Fireworks.ai as a harness transport — the open-weight lane for Corral.
+"""Fireworks.ai transport for ``harness.loop.run`` (hosted open-weight models).
 
-``harness.loop.run`` takes an injectable ``transport(host, payload, timeout)``
-seam. This module is one: it accepts the loop's Ollama-shaped request, calls
-Fireworks' OpenAI-shaped endpoint, and hands the raw response straight back.
-That gets the WHOLE harness — the tool loop, the enforcement gate, the ACP
-permission rail with its exact-bytes diff — pointed at models the fleet has no
-other route to (GLM, Kimi, MiniMax, gpt-oss, Nemotron), instead of only at the
-.21 Ollama node.
-
-WHY THIS IS THIN, which is the point. Two layers already speak OpenAI:
-
-  * ``dialects.message_of`` reads ``choices[0].message`` before falling back to
-    Ollama's ``body.message``, and ``dialects.decode`` reads native
-    ``tool_calls`` off whichever it found.
-  * ``loop.run`` already counts tokens from an OpenAI ``usage`` block (it was
-    taught to for LM Studio / model_shim backends).
-
-So the response needs NO translation at all — it is returned verbatim. Only the
-REQUEST is rewritten, and only to drop Ollama-isms the OpenAI schema rejects.
-Resisting the urge to "normalize" the response is deliberate: a second decoder
-here would be a third place that has to agree with dialects.py about tool-call
-shape, and shapes drift.
-
-DATA CLASS: Fireworks is THIRD-PARTY (``_lib.merit_policy.CANDIDATES`` is the
-authority — no promotion record exists). A pane on this lane is capped at
-``internal``; sensitive work belongs on the Claude, Codex, or sovereign local
-lanes. Corral surfaces that on the lane itself so the choice is visible at the
-moment it is made, not buried here.
-
-REASONING SPEND: measured 2026-08-31, these models think and bill for it, and
-some report no ``reasoning_tokens`` at all (nemotron spent 106 output tokens to
-answer "OK"). ``reasoning_effort: "none"`` is rejected by every model probed, so
-there is no switch to flip — the loop's ``think`` flag is dropped rather than
-translated into a parameter that would 400 the call. Cost visibility lives in
-``_lib.fireworks_llm``'s ledger for direct calls; a pane's spend shows up in the
-same place when the ACP server passes a ``job``.
+Rewrites the loop's Ollama-shaped request into an OpenAI-compatible body and
+returns the response verbatim; ``dialects`` already decodes that shape.
 
     from harness import fireworks_transport, loop
     answer, meta = loop.run(task, tools, model="glm-5p3",
                             transport=fireworks_transport.transport)
 
-Self-test (no spend):  /usr/bin/python3 -m harness.fireworks_transport
-Live check (1 call):   /usr/bin/python3 -m harness.fireworks_transport ping
+Self-test (no spend):  python3 -m harness.fireworks_transport
+Live check (1 call):   python3 -m harness.fireworks_transport ping
 """
 import json
 import os
@@ -54,11 +21,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# The spine is optional: harness is a standalone artifact (README: the
-# selftest runs "no network, no _lib"). Without it this lane is simply
-# unavailable — every entry point below says so instead of tracebacking on
-# an import that happened at module load (found 2026-09-16, decision
-# harness-gate-default-on).
+# Without the _lib spine this lane is unavailable rather than an import error.
 try:
     from _lib import fireworks_llm
 except ImportError:            # standalone clone — no spine, no lane
@@ -72,34 +35,17 @@ def _spine():
         raise FireworksTransportError(_NO_SPINE)
     return fireworks_llm
 
-# Ollama request keys with no OpenAI equivalent. Dropped, never guessed at:
-#   think       — Fireworks has no accepted "off" value (reasoning_effort:"none"
-#                 400s on every model probed), so there is nothing to map it to.
-#   keep_alive  — a node-residency hint; meaningless to a hosted endpoint.
-#   options     — Ollama's nested knob bag; the two that transfer are lifted out
-#                 explicitly below and the rest deliberately do not travel.
+# Ollama request keys with no OpenAI equivalent (Fireworks has no "reasoning off" value).
 _DROP = ("think", "keep_alive", "options")
 
-# Ollama option -> OpenAI parameter. Only knobs with an exact equivalent are
-# carried; a knob translated on vibes silently changes generation behaviour.
+# Ollama option -> OpenAI parameter; only exact equivalents are carried.
 _OPTION_MAP = {"num_predict": "max_tokens", "temperature": "temperature",
                "top_p": "top_p", "seed": "seed", "stop": "stop"}
 # num_predict -1 means "unbounded" to Ollama; OpenAI-shaped APIs reject it.
 _UNBOUNDED = (-1, -2)
-# Sized for REASONING models, which spend the budget before they write a word:
-# glm-5p3 measured 2026-09-13 at 19,651 reasoning tokens + ~3,000 of answer on a
-# 10 KB research prompt (22,740 completion total). At the old 4096 it returned
-# EMPTY content with a normal stop reason on every substantive prompt — the same
-# failure ``deepseek_transport`` documents ("CoT can eat the whole max_tokens and
-# return empty content", 2026-07-08), but unfixable there by disabling thinking
-# because Fireworks accepts no "reasoning off" value. This is a CEILING, not a
-# target: a model that does not think long does not bill more for the headroom.
-# ``loop.py`` now refuses an empty answer outright, so a model that still runs
-# out fails loud instead of returning silence.
+# Ceiling sized for reasoning models, which can spend most of the budget thinking.
 DEFAULT_MAX_TOKENS = 32768
-# The ledger's `job` column for calls made through this seam. The seam
-# signature is fixed by loop.run (host, payload, timeout) and carries no job,
-# so it is process-scoped: the ACP server / gate runner set $HARNESS_JOB.
+# Usage-ledger job name; process-scoped because the transport signature carries no job.
 JOB = os.environ.get("HARNESS_JOB", "harness-fireworks")
 
 
@@ -108,13 +54,9 @@ class FireworksTransportError(RuntimeError):
 
 
 def to_openai_body(payload, qualify=None):
-    """Rewrite one loop payload as a Fireworks/OpenAI request body.
+    """Rewrite one loop payload as an OpenAI-compatible request body (pure).
 
-    Pure and side-effect free (no network, no key) so the self-test can assert
-    the whole mapping without spending anything. ``qualify`` maps the loop's
-    model id to the wire id — Fireworks' namespacing by default; another
-    OpenAI-shaped vendor (``deepseek_transport``) passes its own so the
-    Ollama→OpenAI rewrite lives in exactly one place.
+    ``qualify`` maps the model id to the wire id; defaults to Fireworks namespacing.
     """
     body = {k: v for k, v in payload.items() if k not in _DROP}
     body["model"] = (qualify or _spine().qualify)(payload.get("model"))
@@ -126,10 +68,7 @@ def to_openai_body(payload, qualify=None):
             body[dst] = opts[src]
     body.setdefault("max_tokens", DEFAULT_MAX_TOKENS)
 
-    # `tool_name` is Ollama's spelling on a tool-result message; the OpenAI
-    # schema pairs results by `tool_call_id` and rejects unknown keys on some
-    # backends. dialects.tool_result_message emits both, so dropping this one
-    # loses nothing — the id it actually needs is already there.
+    # Drop Ollama's `tool_name`; OpenAI pairs results by `tool_call_id`.
     msgs = []
     for m in body.get("messages") or []:
         if "tool_name" in m:
@@ -140,15 +79,8 @@ def to_openai_body(payload, qualify=None):
 
 
 def transport(host, payload, timeout):
-    """The ``loop.run(transport=...)`` seam. ``host`` is ignored — Fireworks is
-    one hosted endpoint, not a node the fleet picks between; the parameter stays
-    to satisfy the seam's signature.
-
-    Returns the provider's response VERBATIM: ``dialects`` already decodes the
-    OpenAI shape, so translating here would only add a second decoder to keep in
-    agreement with it.
-    """
-    del host                       # seam signature; no node to address
+    """``loop.run`` transport; ``host`` is ignored. Returns the response verbatim."""
+    del host
     body = to_openai_body(payload)
     data = json.dumps(body).encode("utf-8")
     try:
@@ -163,12 +95,7 @@ def transport(host, payload, timeout):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             b = json.loads(resp.read().decode("utf-8"))
-        # Meter through the client's OWN path (LAST_META, CoT warning, the
-        # fireworks_usage.jsonl ledger) so a pane's spend is visible to the
-        # same ceiling a direct call is. Until 2026-09-09 this returned the
-        # body without accounting, and a Corral pane on this lane was
-        # invisible to observability. Never load-bearing: the body is
-        # returned verbatim whether or not the meter succeeds.
+        # Meter via the client's ledger; failure never blocks the turn.
         try:
             fireworks_llm.meter(b, body["model"], time.monotonic() - t0, job=JOB)
         except Exception as e:     # noqa: BLE001 — metering must not break a turn
@@ -176,8 +103,7 @@ def transport(host, payload, timeout):
         return b
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:400]
-        # ValueError is in loop.run's caught set, so this surfaces as a clean
-        # HarnessError naming the model rather than a raw traceback in the pane.
+        # ValueError becomes a HarnessError in loop.run.
         raise ValueError("Fireworks %s on %s: %s"
                          % (e.code, fireworks_llm.short(body["model"]), detail))
 
@@ -188,14 +114,9 @@ def available():
 
 
 def unavailable_reason():
-    """``None`` when the lane can run, else the REASON, phrased as the fix.
+    """``None`` when the lane can run, else the reason phrased as the fix.
 
-    Mirrors ``codex_launcher.unavailable_reason``. Corral's picker calls this so
-    an unusable lane is greyed out with something actionable, instead of opening
-    a pane that looks alive and dies on the first prompt (the gemini lesson).
-    The two failures are worth distinguishing because the fixes are different
-    and one of them is a one-liner Craig runs constantly: an fscrypt vault that
-    is simply locked after a reboot is not a missing credential.
+    A locked vault is reported separately from a missing key.
     """
     if fireworks_llm is None:
         return _NO_SPINE
@@ -218,10 +139,6 @@ def list_models(**kw):
     return _spine().list_models(**kw)
 
 
-# --------------------------------------------------------------------------- #
-# Self-test:  /usr/bin/python3 -m harness.fireworks_transport        (no spend)
-#             /usr/bin/python3 -m harness.fireworks_transport ping   (1 call)
-# --------------------------------------------------------------------------- #
 def _selftest():
     failures = []
 
@@ -270,7 +187,6 @@ def _selftest():
     check("absent num_predict still bounded (PRINCIPLES 8)",
           b3["max_tokens"] == DEFAULT_MAX_TOKENS)
 
-    # The seam contract: loop.run binds transport(host, payload, timeout).
     import inspect
     try:
         inspect.signature(transport).bind("host", {}, 30)
@@ -279,8 +195,7 @@ def _selftest():
         ok = False
     check("transport binds loop.run's (host, payload, timeout)", ok)
 
-    # The decode half is dialects', not ours — assert it really does read the
-    # OpenAI shape, since this module returns the body verbatim on that belief.
+    # The verbatim response relies on dialects decoding the OpenAI shape.
     if __package__:
         from . import dialects
     else:

@@ -1,49 +1,16 @@
-"""DeepSeek-direct as a harness transport — the second hosted backend for Corral.
+"""DeepSeek-direct transport for ``harness.loop.run``.
 
-Same seam as ``fireworks_transport``: ``harness.loop.run`` takes an injectable
-``transport(host, payload, timeout)``; this one posts the loop's Ollama-shaped
-request to DeepSeek's OpenAI-shaped endpoint and returns the response
-verbatim (``dialects`` already decodes that shape). The request rewrite is
-``fireworks_transport.to_openai_body`` with DeepSeek's identity ``qualify`` —
-one rewrite, two vendors, so the two cannot drift apart on tool-result shape.
-
-WHY A SECOND HOSTED BACKEND (open-models panel, 2026-09-09, Gemini's arm):
-Fireworks sells deepseek-v4-flash at $0.22/$0.66; DeepSeek direct sells the
-same model at $0.14/$0.28 (off-peak cache-miss, `model_router.PRICING`).
-Routing DeepSeek traffic through Fireworks is a straight loss, so the fleet
-never should — but until today the only way to drive a DeepSeek model with
-tools behind the ACP permission rail WAS the Fireworks lane. This closes
-that: `HARNESS_ACP_PROVIDER=deepseek` puts the identical rail (exact-bytes
-diff, fail-closed permission) in front of DeepSeek at direct prices.
-
-THE ONE KNOB THAT MAPS. Fireworks has no accepted "reasoning off" value, so
-that transport DROPS the loop's ``think`` flag. DeepSeek's V4 family is
-hybrid-thinking (``deepseek_llm.HYBRID_THINKING_MODELS``) and thinks unless
-told not to — verified live 2026-07-08, CoT can eat the whole max_tokens and
-return empty content. So here ``think`` maps EXACTLY: ``think=False`` (the
-loop's default) sends ``{"thinking": {"type": "disabled"}}``; ``think=True``
-leaves the model's default on and pays for it. A hybrid slug missing from
-that set is the dangerous direction (thinks silently), which is why the set
-is the client's, not a copy here.
-
-DATA CLASS: DeepSeek is THIRD-PARTY, PRC-hosted (``_lib.merit_policy.
-CANDIDATES`` is the authority) — a pane on this lane is capped at
-``internal``. The ACP server reads that ceiling from merit_policy and
-reports it on the lane; nothing is restated here.
-
-METERING: every turn is accounted through ``deepseek_llm.meter()`` into
-``observability/data/deepseek_usage.jsonl`` under ``$HARNESS_JOB``, the same
-line a direct ``generate(job=…)`` writes — a pane's spend is visible to the
-aggregate ceiling from the first turn, not bolted on later (the Fireworks
-transport shipped without this and was invisible for nine days).
+Posts the loop's Ollama-shaped request to DeepSeek's OpenAI-compatible endpoint
+via the shared ``fireworks_transport.to_openai_body`` rewrite. ``think=False``
+disables thinking on hybrid models, which otherwise reason by default. Every
+turn is metered through ``deepseek_llm.meter()`` under ``$HARNESS_JOB``.
 
     from harness import deepseek_transport, loop
     answer, meta = loop.run(task, tools, model="deepseek-v4-flash",
                             transport=deepseek_transport.transport)
 
-Self-test (no spend):  /usr/bin/python3 -m harness.deepseek_transport
-Live check (1 call):   /usr/bin/python3 -m harness.deepseek_transport ping
-Multi-step gate:       /usr/bin/python3 -m harness --gate deepseek-v4-flash --provider deepseek
+Self-test (no spend):  python3 -m harness.deepseek_transport
+Live check (1 call):   python3 -m harness.deepseek_transport ping
 """
 import json
 import os
@@ -63,8 +30,7 @@ if __package__:
 else:
     from harness.fireworks_transport import to_openai_body  # noqa: E402
 
-# The ledger's `job` column for calls made through this seam (process-scoped;
-# the seam signature carries no job). Same env as the Fireworks transport.
+# Usage-ledger job name for calls through this transport.
 JOB = os.environ.get("HARNESS_JOB", "harness-deepseek")
 
 
@@ -73,7 +39,7 @@ class DeepSeekTransportError(RuntimeError):
 
 
 def to_deepseek_body(payload):
-    """The shared OpenAI rewrite plus the one DeepSeek-specific knob. Pure."""
+    """Shared OpenAI rewrite plus DeepSeek's thinking toggle."""
     body = to_openai_body(payload, qualify=lambda m: m)   # DeepSeek ids are bare
     model = body.get("model")
     if model in deepseek_llm.HYBRID_THINKING_MODELS and not payload.get("think"):
@@ -82,8 +48,7 @@ def to_deepseek_body(payload):
 
 
 def transport(host, payload, timeout):
-    """The ``loop.run(transport=...)`` seam. ``host`` is ignored — one hosted
-    endpoint, not a node the fleet picks between."""
+    """``loop.run`` transport; ``host`` is ignored (single hosted endpoint)."""
     del host
     body = to_deepseek_body(payload)
     data = json.dumps(body).encode("utf-8")
@@ -107,7 +72,7 @@ def transport(host, payload, timeout):
         return b
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:400]
-        # ValueError is in loop.run's caught set → a clean HarnessError.
+        # ValueError becomes a HarnessError in loop.run.
         raise ValueError("DeepSeek %s on %s: %s" % (e.code, body["model"], detail))
 
 
@@ -117,8 +82,7 @@ def available():
 
 
 def unavailable_reason():
-    """``None`` when the lane can run, else the REASON phrased as the fix
-    (mirrors fireworks_transport.unavailable_reason for the Corral picker)."""
+    """``None`` when the lane can run, else the reason phrased as the fix."""
     from _lib import secrets
     key_file = Path.home() / ".key" / "deepseek_key"
     if os.environ.get("DEEPSEEK_API_KEY"):
@@ -134,15 +98,10 @@ def unavailable_reason():
 
 
 def list_models(**kw):
-    """Live catalog for the pane's picker. DeepSeek's /models publishes no
-    supports_tools flag, so unlike Fireworks this cannot filter on the
-    vendor's word — the multi-step gate is the tool-fitness evidence
-    (harness/reviews/). Returns ``[{"id", "tools"}]`` in the Fireworks shape
-    so the ACP server treats both the same way."""
+    """Live model catalog as ``[{"id", "tools"}]``; DeepSeek publishes no tools flag."""
     return [{"id": m["id"], "tools": True} for m in deepseek_llm.list_models(**kw)]
 
 
-# --------------------------------------------------------------------------- #
 def _selftest():
     failures = []
 

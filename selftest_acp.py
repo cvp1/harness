@@ -1,10 +1,9 @@
 """Wire-level selftest for acp_server — offline (HARNESS_ACP_FAKE), no node.
 
-Drives the server exactly as Corral's client does: JSON-RPC over the
-subprocess's stdio. The permission checks meet the spike's bar: refusal is
-verified on the FILESYSTEM, never trusted from the transcript.
+Drives the server over subprocess stdio; permission refusals are verified on
+the filesystem.
 
-Run:  cd ~/Github/CC && /usr/bin/python3 -m harness.selftest_acp
+Run:  python3 -m harness.selftest_acp
 """
 import json
 import os
@@ -26,7 +25,7 @@ def ok(cond, label):
 
 
 class Client:
-    """Minimal mirror of corral/acp.py — enough to prove the server's wire."""
+    """Minimal ACP client over the server's stdio."""
 
     def __init__(self, fake, state_dir, answer=None):
         env = {**os.environ, "HARNESS_ACP_FAKE": fake,
@@ -112,7 +111,7 @@ def main():
         ok([m["content"] for m in saved["history"]] ==
            ["hello", "echo: hello", "again", "echo: again"],
            "history persisted across turns")
-        # set_config: opencode-era namespaced ids normalize; junk refuses loud
+        # set_config: namespaced ids normalize; junk refuses loud
         r = c.request("session/set_config_option",
                       {"sessionId": sid, "configId": "model",
                        "value": "ollama/fake-model"})
@@ -183,10 +182,6 @@ def main():
         c.close()
 
         # ── run_bash allow_always is per command PREFIX, not per tool ────
-        # Grok 2026-09-16 #9: "Always allow run_bash" meant any command for
-        # the session. Now it grants the program(s) of THAT command; a
-        # different program raises the card again; a wrapper/substitution/
-        # redirection is never offered a standing grant at all.
         def _bash_session(answer):
             cl = Client("bash", state, answer=answer)
             cl.request("initialize")
@@ -215,9 +210,7 @@ def main():
         ok(len(p) == 1, "prefix: a pipe with one ungranted segment asks")
         for cmd in ("sudo wc -l x", "bash -c 'wc -l x'", "wc -l $(ls)",
                     "wc -l x > out", "python3 -c 'print(1)'",
-                    # bug bash 2026-09-27 #12: wrappers whose real program is
-                    # an argument collapsed to the wrapper's name, so a grant
-                    # on `stdbuf -oL wc` covered `stdbuf -oL bash -c …`.
+                    # Wrappers that run an argument program get no grant.
                     "stdbuf -oL wc -l x", "setsid wc -l x", "busybox wc -l x",
                     "flock lk wc -l x", "taskset 1 wc -l x", "unshare wc -l x",
                     "strace -f wc -l x", "chroot d wc -l x",
@@ -240,15 +233,7 @@ def main():
         c.close()
 
 
-        # ── the vault is gated by the lane's data class, not just labelled ──
-        # DATA_CLASS was computed and reported in serverInfo and then never
-        # consulted, so a Fireworks/DeepSeek pane carried search_notes and
-        # read_note over ~/notes -- and neither is in RISKY, so neither ever
-        # raised a card. Found by the 2026-09-11 bug bash (grok, CONFIRMED).
-        # Under it sat a second defect: _data_class_for passed has_tools=True
-        # to merit_policy.eligible, which is a routing-QUALITY opinion, and it
-        # demoted the SOVEREIGN local lane to `internal`. Both are asserted
-        # here, because fixing either alone gives a wrong answer.
+        # ── the vault is gated by the lane's data class ──
         import acp_server as _srv
         ok(_srv._data_class_for("local") == "sensitive",
            "the sovereign local lane keeps a sensitive ceiling (a tool-quality "
@@ -259,8 +244,7 @@ def main():
         ok(_srv._data_class_for("no-such-provider") == "internal",
            "an unknown provider fails closed to internal")
 
-        # The gate itself, without standing a server up: _vault_tools consults
-        # the module-level DATA_CLASS, so assert on both settings of it.
+        # _vault_tools reads module-level DATA_CLASS; assert both settings.
         _real = _srv.DATA_CLASS
         try:
             _srv.DATA_CLASS = "internal"

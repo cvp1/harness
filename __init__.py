@@ -1,7 +1,3 @@
-"""harness — the fleet's own agentic loop + model translation layer.
-
-We ARE the harness: canonical tools/messages in, any local model's dialect
-translated by ``dialects``, bounded execution by ``loop``. See DESIGN.md.
-"""
+"""harness — bounded agentic loop that translates canonical tools/messages into each local model's dialect."""
 from .loop import Tool, HarnessError, run, run_agentic  # noqa: F401
-from . import policy  # noqa: F401  — the default gate; compose with policy.gate()
+from . import policy  # noqa: F401

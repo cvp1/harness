@@ -1,46 +1,9 @@
-"""policy — the harness's DEFAULT tool gate (stdlib-only; travels with the artifact).
+"""policy — the harness's default tool gate; ``loop.run(gate=None)`` uses DEFAULT.
 
-Until 2026-09-16 ``loop.run(gate=None)`` meant *no gate*: every caller that did
-not pass one ran the model's tool calls unscreened, and only one of nine
-in-workspace callers passed one (``observability/ranch_diag.py``). The seam was
-right (``_gate_ok`` in ``loop.py``) and the composition was optional, so the
-control covered one job. ``gate=None`` now means THIS gate. There is no
-*implicit* ungated run; a caller that wants a different policy passes one
-explicitly (``gate=``), which is greppable — that explicit argument IS the
-opt-out, and the selftest uses it. This module does not defend against
-in-process tampering (an attribute spoof, a mutated table): the policy is
-git-tracked code and the trust model is the repo, not the interpreter.
-
-The policy IS code (same reasoning as ``_lib/policy_gate``): a data file could
-be rewritten by a poisoned write; the git-tracked module is the trust anchor.
-It lives here rather than in ``_lib`` because the harness is a standalone
-artifact — cloned anywhere, ``_lib`` absent by design (README) — and a policy
-that vanishes when the spine is absent is not a policy. In-workspace the two
-compose: a tool this module does not know falls through to
-``_lib.policy_gate.check`` when that is importable, and to DENY when it is not.
-
-Rules, in order of lookup:
-  * ``declare`` — the caller's own tools, each a predicate ``args -> (ok, why)``.
-    A caller may declare a tool this module has no policy for; it may NEVER
-    replace a built-in policy (ValueError at construction, not at call time).
-  * built-ins — ``read_file`` / ``write_file`` / ``list_dir``: textual path
-    checks (no control chars, no backslash, not absolute, no ``..`` segment
-    even after normalisation, length cap) and a content cap. Independent of
-    ``tools_local._confine`` on purpose — that one resolves; this one reads the
-    string. A re-check that shares its predicate with the thing it re-checks
-    proves nothing (``_lib/scrub.py``, 2026-08-13). A textual miss that the
-    resolve layer still catches is depth erosion, not an escape; the reverse
-    (a symlink inside the jail pointing out) is the resolve layer's job.
-  * ``run_bash`` — DENIED unless the caller declares a policy built by
-    :func:`bash_policy`: an explicit allowlist of whole-command regexes, or the
-    named sentinel :data:`BASH_ANY` for a lane a human drives interactively.
-    Either way the shape checks run (single line, no NUL, length cap), and an
-    allowlist policy additionally refuses shell syntax (``; | & $ ` ( ) < >``)
-    unless the caller says ``shell_syntax=True`` — because a regex like
-    ``\\S+`` is an instruction to swallow ``data.txt;id`` (Grok review,
-    2026-09-16). The sentinel exists so that "any bash" is a deliberate,
-    searchable choice and never the accident of forgetting an argument.
-  * unknown tool — DENY (fail closed), via ``_lib.policy_gate`` if present.
+Lookup order: caller-declared tools (may never replace a built-in), built-in
+path/content checks for read_file/write_file/list_dir, run_bash denied unless
+declared via :func:`bash_policy`, unknown tools fall through to
+``_lib.policy_gate`` when importable and otherwise deny.
 
     from harness import policy
     gate = policy.gate({"run_bash": policy.bash_policy([r"wc -l [\\w./-]+"])})
@@ -56,22 +19,16 @@ MAX_WRITE_CHARS = 200_000
 MAX_BASH_CHARS = 4000
 MAX_STRING_ARG = 4096
 
-# Shell syntax an allowlist regex must not be allowed to swallow. Newline is
-# handled by the control-character check; this is the in-line set.
+# Shell syntax an allowlist regex must not swallow (newline is a control char).
 SHELL_META = ";|&$`()<>"
 
-# Named, greppable: "this lane may run any single-line bash command". For
-# surfaces a human drives (the ACP pane with its permission card, the CLI
-# under an explicit flag) — never for an unattended job, which declares an
-# allowlist, and not for a model under test.
+# Sentinel: allow any single-line bash command; only for human-driven lanes.
 BASH_ANY = object()
 
 
 # ------------------------------------------------------------- primitives ---
 def _has_ctrl(val):
-    """True if ``val`` carries any control or line/paragraph separator —
-    including the Unicode ones (U+0085, U+2028, U+2029, VT, FF) that a
-    ``\\r\\n``-only check misses."""
+    """True if ``val`` carries any control or Unicode line/paragraph separator."""
     for c in val:
         if unicodedata.category(c) in ("Cc", "Zl", "Zp"):
             return True
@@ -89,10 +46,7 @@ def _bad_text(val, cap, what):
     return None
 
 
-# Segments a jailed write may never touch, whatever the workdir: the trust
-# anchor is git-tracked CODE, and a workdir that contains the workspace (the
-# ACP pane's cwd can be ~/Github/CC) would let `write_file` rewrite this very
-# module (Astra review 2026-09-16). `.git` because a hook is code execution.
+# Path segments write_file may never touch: the policy's own code and repo plumbing.
 WRITE_DENY_SEGMENTS = frozenset({"harness", "_lib", ".git", ".claude"})
 
 
@@ -100,8 +54,7 @@ def _check_path(args, required=True):
     path = args.get("path")
     if path is None:
         return (False, "path is required") if required else (True, "ok")
-    # Shape BEFORE the empty-means-default shortcut: `"\n" * 5000` used to
-    # read as "no path given" (Astra review 2026-09-16).
+    # Shape check runs before the empty-means-default shortcut.
     why = _bad_text(path, MAX_PATH_CHARS, "path")
     if why:
         return False, why
@@ -190,11 +143,8 @@ def bash_policy(allow, hint="", shell_syntax=False):
             if hit:
                 return False, ("shell syntax %s is not permitted in this lane"
                                % "".join(hit))
-        # Only ASCII space runs are normalised (tab is a control character
-        # and was refused above); any other Unicode space (NBSP…) is refused,
-        # because `str.split()` would collapse it while bash reads it as part
-        # of a word — the regex would then be checking a command that is not
-        # the one executing (Astra review 2026-09-16).
+        # Refuse non-ASCII spaces: bash reads them as part of a word, so a
+        # normalised command would not be the one executing.
         if any(unicodedata.category(c) == "Zs" and c != " " for c in raw):
             return False, "command carries a non-ASCII space"
         cmd = re.sub(r" +", " ", raw.strip())
@@ -264,10 +214,7 @@ def gate(declare=None):
     """Build the gate callable ``(tool_name, args) -> (bool, reason)``.
 
     Raises ``ValueError`` at construction for a declaration that would weaken
-    a built-in policy — a bad composition must fail when it is written, not
-    when the model happens to call the tool. The spine is resolved here and,
-    while absent, re-tried on each unknown-tool call — so a gate built before
-    the workspace was importable recovers; one built without a spine denies.
+    a built-in policy.
     """
     declared = dict(declare or {})
     for name, fn in declared.items():
@@ -291,9 +238,7 @@ def gate(declare=None):
                 return False, "policy error evaluating %r: %s" % (tool, e)
             return bool(ok), why
         if state["spine"] is None:
-            # Re-discover on demand: a gate built before the workspace landed
-            # on sys.path would otherwise deny spine tools forever (Astra
-            # review 2026-09-16). Absent stays absent-and-deny; never allow.
+            # Re-discover the spine on demand; still absent means deny.
             state["spine"] = _spine_check()
         if state["spine"] is not None:
             d = state["spine"](tool, args)

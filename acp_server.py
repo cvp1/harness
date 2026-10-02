@@ -1,39 +1,14 @@
-"""acp_server — the harness as an ACP agent (stdlib-only). Corral's sovereign pane.
+"""acp_server — the harness as an Agent Client Protocol agent (JSON-RPC 2.0 over stdio).
 
-Speaks Agent Client Protocol (JSON-RPC 2.0 over stdio) so Corral — or any ACP
-client — can drive OUR loop as a first-class pane. This replaces the last
-rented loop on this host: Corral's "Local (Ollama .21)" lane ran on opencode;
-now the lane is harness end to end.
+Handles initialize and session/new|load|list|prompt|set_config_option|cancel,
+streaming output as session/update notifications. write_file and run_bash
+require a session/request_permission answer carrying the exact bytes and a
+diff; no answer fails closed. Sessions persist as JSON under
+``~/.local/state/cc/harness-acp/``.
 
-Wire contract implemented against ground truth, not the spec PDF: Corral's own
-client (``corral/acp.py``) and the measured shapes in
-``corral/spike/FINDINGS.md``:
+Offline test mode: ``HARNESS_ACP_FAKE=answer|tool|bash`` swaps in a scripted model.
 
-  * ``initialize`` / ``session/new`` / ``session/load`` / ``session/list`` /
-    ``session/prompt`` / ``session/set_config_option`` (requests),
-    ``session/cancel`` (notification).
-  * Turn output streams as ``session/update`` notifications
-    (``agent_message_chunk``, ``tool_call``, ``tool_call_update``); the
-    ``session/prompt`` response carries ``stopReason`` when the turn ends.
-  * ``session/request_permission`` is a CLIENT-DIRECTED REQUEST: write_file
-    and run_bash block until the human answers. PRINCIPLES 17: the request
-    carries the exact bytes (``rawInput``) and a structured diff, so approval
-    is consent, not presence. Unanswered/cancelled FAILS CLOSED (the tool
-    does not run; the model is told "DENIED").
-  * ``configOptions`` advertises the model picker (id ``model``), values from
-    the node's live tags — never a hardcoded list.
-
-Sessions persist under ``~/.local/state/cc/harness-acp/`` (one JSON per
-session: cwd, model, history, title) so ``session/load`` survives the
-one-process-per-pane lifecycle. History replay is deliberately NOT emitted on
-load — the client holds the transcript (FINDINGS.md §3).
-
-Offline test mode: ``HARNESS_ACP_FAKE=answer|tool`` swaps the model transport
-for a deterministic script so ``selftest_acp.py`` exercises the whole wire —
-including the permission round-trip — with no node and no model.
-
-Launch (what Corral's AGENTS registry points at):
-    /usr/bin/python3 -m harness.acp_server
+Launch:  python3 -m harness.acp_server
 """
 import json
 import os
@@ -57,33 +32,24 @@ else:
 STATE_DIR = Path(os.environ.get(
     "HARNESS_ACP_STATE", str(Path.home() / ".local/state/cc/harness-acp")))
 PERMISSION_TIMEOUT = 3600      # a human may be away; bounded, then fail closed
-MAX_LINE = 16 * 1024 * 1024    # mirror corral's own stdin bound
+MAX_LINE = 16 * 1024 * 1024    # max bytes per JSON-RPC line
 RISKY = {"write_file", "run_bash"}   # tools that need the human's yes
 
-# "Always allow" on run_bash is a PER-COMMAND-PREFIX grant, never the whole
-# tool (Grok 2026-09-16 #9: per-tool allow_always on the ACP pane meant "any
-# single-line command for the rest of the session"). The native Claude Code
-# idiom — "don't ask again for `wc` commands this session" — and the same
-# shape: a grant names the program(s) a command runs; a compound command is
-# auto-allowed only when EVERY segment's program is granted. No grant is
-# offered at all where a prefix would be a lie: wrappers whose real program
-# is an argument (sudo, bash -c, env, xargs …), substitutions, redirections
-# (a write without the diff card). Those get allow-once/reject only.
+# "Always allow" on run_bash grants per program prefix; a compound command is
+# auto-allowed only when every segment's program is granted. Wrappers that run
+# a program named in their arguments, substitutions, and redirections get no grant.
 _BASH_WRAPPERS = frozenset((
     "sudo", "doas", "env", "bash", "sh", "zsh", "dash", "ksh", "xargs",
     "nohup", "time", "timeout", "nice", "ionice", "command", "builtin",
     "exec", "eval", "source", ".", "watch", "find", "script", "su",
     "python", "python3", "perl", "ruby", "node",   # `-c`/`-e` run anything
-    # Bug bash 2026-09-27 #12: these also run a program named in their
-    # arguments, so a grant on `stdbuf -oL wc` covered `stdbuf bash -c …`.
     "stdbuf", "setsid", "busybox", "flock", "taskset", "unshare", "strace",
     "ltrace", "chroot", "nsenter", "chrt", "numactl", "fakeroot", "firejail",
     "systemd-run", "runuser", "pkexec", "sg", "newgrp", "unbuffer", "rlwrap",
     "parallel", "gdb", "valgrind", "faketime", "torsocks", "proxychains",
     "proxychains4", "caffeinate", "arch", "ssh",
 ))
-# A program whose GLOBAL options can name a program to run (`git -c
-# core.pager=…`, `git --exec-path=…`): no prefix grant when they are present.
+# Global options that can name a program to run; no prefix grant when present.
 _BASH_CONFIG_OPTS = {"git": ("-c", "--config-env", "--exec-path")}
 _BASH_NO_GRANT = re.compile(r"[`<>\n]|\$\(|\$\{|\(")
 _BASH_SEGMENT = re.compile(r"\|\|?|&&?|;")
@@ -91,8 +57,7 @@ _BASH_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def bash_prefixes(cmd):
-    """The program names a command runs, as a frozenset — or ``None`` when no
-    prefix grant is honest for it (then the card offers allow-once only)."""
+    """Return the program names a command runs, or ``None`` when no prefix grant is safe."""
     if not isinstance(cmd, str) or not cmd.strip():
         return None
     if _BASH_NO_GRANT.search(cmd):
@@ -125,49 +90,17 @@ SYSTEM = ("You are a capable local agent working inside the directory %s. "
           "Use the tools when they help; answer concisely. If a tool is "
           "DENIED by the operator, respect it and continue without it.")
 
-# --------------------------------------------------------------------------- #
-# Model BACKEND seam ($HARNESS_ACP_PROVIDER, default the sovereign .21 node).   #
-#                                                                              #
-# The harness is the loop, the tools, and the permission rail; WHICH model      #
-# answers is a separate axis, and this server had the .21 node wired into two   #
-# places (the picker's source and the transport). Naming the seam lets the      #
-# identical rail — same exact-bytes diff, same fail-closed permission — front   #
-# open-weight models the fleet cannot reach any other way, without a second     #
-# copy of this file.                                                            #
-#                                                                              #
-# What a provider is: `models()` -> the picker's live values (never hardcoded), #
-# `transport` -> the loop's injectable seam (None = loop's own Ollama default), #
-# `data_class` -> the ceiling on what may be typed into a pane on this lane.    #
-# The data class is a FACT ABOUT THE VENDOR, and its one authority is           #
-# `_lib.merit_policy.CANDIDATES` — it is read from there, never restated here,  #
-# because a second copy is exactly how the Grok ruling sat wrong for four days. #
-# --------------------------------------------------------------------------- #
+# Model backend, selected by $HARNESS_ACP_PROVIDER (default: local Ollama).
+# The data-class ceiling is read from _lib.merit_policy, never restated here.
 PROVIDER = os.environ.get("HARNESS_ACP_PROVIDER", "local").strip().lower()
 
 
 def _data_class_for(target):
-    """The ceiling for `target`, from merit_policy — the ONE authority.
-
-    Fails CLOSED (PRINCIPLES 4): if the taxonomy cannot be read, or names a
-    provider we do not know, the answer is the restrictive `internal`, never an
-    optimistic `sensitive`.
-    """
+    """Data-class ceiling for `target` from merit_policy; fails closed to `internal`."""
     try:
         from _lib import merit_policy
-        # has_tools=False ON PURPOSE. eligible() answers two questions at once:
-        # "may this data class reach this provider" (the trust axis) and "is
-        # this provider any good at driving tools" (a routing-QUALITY opinion
-        # about a raw API call). Only the first is a data-class ceiling's
-        # business. Passing True silently demoted `local` -- the SOVEREIGN lane,
-        # Ollama on Craig's own hardware, the one that still answers when the
-        # WAN is down -- from sensitive to internal, killing it with a quality
-        # opinion about a different code path. Measured 2026-09-11:
-        # eligible("local", "sensitive", True) is False and
-        # eligible("local", "sensitive", False) is True.
-        #
-        # roles.py hit this exact conflation on 2026-09-10 and carries the same
-        # note (roles._data_class_ok). This copy never got it -- the second
-        # authority that drifted from the first.
+        # has_tools=False: only the trust axis sets a data-class ceiling, not
+        # tool-quality routing, which would wrongly demote the local lane.
         return ("sensitive" if merit_policy.eligible(target, "sensitive", False)
                 else "internal")
     except Exception:  # noqa: BLE001 — unreadable taxonomy => the closed answer
@@ -190,10 +123,7 @@ def _local_default():
 
 def _fireworks_models():
     from harness import fireworks_transport as fw
-    # Tool-capable models only: every pane on this lane is handed write_file /
-    # run_bash, and a model that cannot emit a tool_call would sit in the picker
-    # looking usable while silently never being able to act. The provider
-    # publishes the flag, so this is a filter on fact, not a guess.
+    # Tool-capable models only, per the provider's published flag.
     return [m["id"] for m in fw.list_models() if m["tools"]][:20]
 
 
@@ -230,10 +160,7 @@ PROVIDERS = {
         "transport": lambda: None,     # loop.run's own /api/chat default
         "target": "local",             # merit_policy key -> sovereign
         "where": "on the node",        # phrasing for the unknown-model refusal
-        # loop.run's 180s default is sized for a local POST ("cold load ~20s").
-        # Keep it: a local model silent for ten minutes is a real failure, and
-        # masking it with a long timeout is the wrong direction.
-        "call_timeout": None,
+        "call_timeout": None,          # loop.run's local default
     },
     "fireworks": {
         "label": "Fireworks.ai",
@@ -242,30 +169,20 @@ PROVIDERS = {
         "transport": _fireworks_transport,
         "target": "fireworks",         # merit_policy key -> THIRD party
         "where": "on Fireworks",
-        # HOSTED REASONING MODELS ARE SLOW BY DESIGN. glm-5p3 measured
-        # 2026-09-13 at ~280s to produce 22,740 completion tokens (19,651 of
-        # them reasoning). The 180s local default cut that off mid-generation,
-        # turning the raised token ceiling into a timeout instead of an answer.
-        # Sized to the token budget, not to a local node's cold load.
-        "call_timeout": 900,
+        "call_timeout": 900,           # hosted reasoning models are slow
     },
     "deepseek": {
-        # DeepSeek at DIRECT prices (2026-09-09): the same model costs ~2x
-        # via Fireworks, so a DeepSeek pane must never ride that lane.
         "label": "DeepSeek (direct)",
         "models": _deepseek_models,
         "default": _deepseek_default,
         "transport": _deepseek_transport,
         "target": "deepseek",          # merit_policy key -> THIRD party
         "where": "on DeepSeek",
-        # Same reason as Fireworks: V4 is hybrid-thinking and bills the CoT.
-        "call_timeout": 900,
+        "call_timeout": 900,           # hosted reasoning models are slow
     },
 }
 if PROVIDER not in PROVIDERS:
-    # Loud and fatal, not a silent fallback to local: a pane that quietly
-    # answered from a different vendor than the lane promised would be the one
-    # failure this seam must never have.
+    # Fatal rather than a silent fallback to a different vendor.
     raise SystemExit("harness-acp: unknown HARNESS_ACP_PROVIDER %r (have: %s)"
                      % (PROVIDER, ", ".join(sorted(PROVIDERS))))
 SPEC = PROVIDERS[PROVIDER]
@@ -289,8 +206,7 @@ def _fake_transport(kind):
                 {"function": {"name": "write_file",
                               "arguments": {"path": "fake.txt", "content": "hi"}}}]},
                 "eval_count": 1}
-        # "bash": each user prompt IS the command to run — the selftest drives
-        # the per-prefix allow_always grant with a sequence of real commands.
+        # "bash": each user prompt is the command to run.
         if kind == "bash" and last.get("role") == "user":
             return {"message": {"role": "assistant", "content": "", "tool_calls": [
                 {"function": {"name": "run_bash",
@@ -391,24 +307,10 @@ class Server:
 
     # ── tools ─────────────────────────────────────────────────────────────
     def _vault_tools(self):
-        """The vault reader — attached ONLY on a lane that may hold the vault.
+        """Vault reader tools, attached only when DATA_CLASS is `sensitive`.
 
-        `~/notes` is Craig's own writing: the ranch, the family, the money, the
-        client-adjacent thinking. A lane whose ceiling is `internal` may not
-        carry it (P11), and until 2026-09-11 the ceiling was COMPUTED (line ~183)
-        and REPORTED in serverInfo.dataClass and then not consulted here, so
-        DATA_CLASS was a label rather than a gate.
-
-        The reachable path, found by the 2026-09-11 bug bash (grok, CONFIRMED,
-        re-read here): Library -> a vault note -> agent = Fireworks or DeepSeek
-        -> "Open agent here". The pane's cwd is ~/notes, the opening prompt
-        tells the model to read the file, and neither `search_notes` nor
-        `read_note` is in RISKY -- so no permission card is ever raised and the
-        bytes go to a third party. Roles could not save it: the data-class gate
-        lives in roles.py and this path starts without a role.
-
-        Fails closed with the rest: an unreadable taxonomy already resolves
-        DATA_CLASS to `internal`, so it resolves to NO vault tools here.
+        The vault holds private notes and its readers raise no permission card,
+        so any lower ceiling gets no vault tools.
         """
         if DATA_CLASS != "sensitive":
             return []
@@ -427,10 +329,7 @@ class Server:
     _vault_policies = {}
 
     def _gate_for(self):
-        """The pane's gate: harness default + bash for a human-driven lane +
-        the vault tools' own declarations (one home: wiki/ask_local). A tool
-        nobody declared is denied — the permission card is the human's yes,
-        this is the schema check that runs regardless of it."""
+        """Gate: harness default + any-bash (human-approved) + the vault tools' declarations."""
         declare = {"run_bash": hpolicy.bash_policy(hpolicy.BASH_ANY)}
         declare.update(self._vault_policies)
         return hpolicy.gate(declare)
@@ -456,10 +355,7 @@ class Server:
 
     @staticmethod
     def _grant_keys(tool_name, args):
-        """What an "always allow" on this call would grant, as a set of keys —
-        or ``None`` when no standing grant is offered for it. run_bash grants
-        per program prefix (``bash_prefixes``); every other risky tool grants
-        the tool."""
+        """Keys an "always allow" would grant (per program prefix for run_bash), or ``None``."""
         if tool_name != "run_bash":
             return frozenset((tool_name,))
         prefixes = bash_prefixes((args or {}).get("command"))
@@ -552,10 +448,7 @@ class Server:
 
     # ── handlers ──────────────────────────────────────────────────────────
     def _h_initialize(self, params):
-        # The provider is reported, not implied: two lanes now run this same
-        # binary against different vendors with different data ceilings, and a
-        # pane that cannot say which one it is would leave Craig guessing what
-        # he may safely type into it.
+        # Report the provider and data ceiling so the client can show them.
         return {"protocolVersion": 1, "authMethods": [],
                 "agentCapabilities": {"loadSession": True},
                 "serverInfo": {"name": "harness-acp", "version": "0.2",
@@ -603,14 +496,7 @@ class Server:
 
     @staticmethod
     def _normalize_model(value):
-        """Strip provider namespaces off a model id.
-
-        Corral remembers a pane's last model per lane and re-applies it on
-        create — and the retired opencode lane remembered ids like
-        ``ollama/gemma4-e4b-agent-64k:latest``. Ollama's own API has no such
-        namespace, so storing that verbatim 404'd every prompt (live,
-        2026-08-03). The tag is the tag; prefixes are someone else's routing.
-        """
+        """Strip an ``ollama/`` or ``local/`` prefix, which Ollama's API rejects."""
         value = (value or "").strip()
         if "/" in value and value.split("/", 1)[0] in ("ollama", "local"):
             value = value.split("/", 1)[1]
@@ -626,8 +512,7 @@ class Server:
         opts = self._config_options(sess)
         known = [o["value"] for o in opts[0]["options"]]
         if known and want not in known:
-            # Refuse loudly with the fix in the message — Corral renders this
-            # as a note and keeps the current model, which is the safe default.
+            # Refuse with the available models; the current model is kept.
             raise ValueError("unknown model %r %s; have: %s"
                              % (want, SPEC["where"], ", ".join(known[:6])))
         sess["model"] = want

@@ -1,6 +1,6 @@
-"""Offline selftest for the harness — every dialect rung, every bound, no network.
+"""Offline selftest for the harness — dialect rungs, loop bounds, policy; no network.
 
-Run:  cd ~/Github/CC && /usr/bin/python3 -m harness.selftest
+Run:  python3 -m harness.selftest
 """
 import json
 import sys
@@ -17,9 +17,7 @@ else:
 
 FAILS = []
 
-# The loop tests use synthetic tools (echo, bomb, big…) that no policy knows;
-# they pass an explicit permissive gate so they test the LOOP. That the
-# default denies them is test_policy's business, not theirs.
+# Permissive gate for loop tests whose synthetic tools no policy knows.
 _ALLOW = lambda n, a: (True, "ok")  # noqa: E731
 
 
@@ -74,7 +72,7 @@ def test_decoder():
     ok(d.text == "done", "closed think stripped")
     d = dialects.decode(body('<think>hmm forever'))
     ok(d.text == "", "unclosed think = all CoT")
-    # think + tool call together (the §4n regime).
+    # think + tool call together.
     d = dialects.decode(body(
         '<think>x</think><tool_call>{"name": "a", "args": {}}</tool_call>'))
     ok(d.calls and d.calls[0]["name"] == "a", "think + tool_call decode")
@@ -91,8 +89,7 @@ def test_decoder():
     # Final answer path.
     d = dialects.decode(body("All done: 3 lines."))
     ok(d.calls == [] and d.text.startswith("All done"), "plain final answer")
-    # OpenAI-compatible body (LM Studio / model_shim backend): choices[0],
-    # outer id, string arguments.
+    # OpenAI-compatible body: choices[0], outer id, string arguments.
     oai = {"choices": [{"message": {
         "role": "assistant", "content": "",
         "tool_calls": [{"id": "call_9", "type": "function",
@@ -266,12 +263,7 @@ def test_loop():
 
 # -------------------------------------------------- empty-answer / reasoning ---
 def test_empty_answer_fails_loud():
-    """A reasoning model that spends its budget must not look like success.
-
-    Regression for the 2026-09-13 silent-wrong-result: glm-5p3 on the Fireworks
-    lane burned 19,651 reasoning tokens, returned empty content with a normal
-    stop reason, and ``loop.run`` handed the caller "" as a final answer.
-    """
+    """A reasoning model that spends its budget must not look like success."""
     echo = loop.Tool("echo", "echo", {"type": "object", "properties": {}},
                      lambda a: "x")
 
@@ -318,10 +310,7 @@ def test_empty_answer_fails_loud():
                              transport=transport, gate=_ALLOW)
     ok(answer == "the actual answer", "empty: a real answer still returns")
 
-    # 6. Fireworks default ceiling must clear a measured reasoning run.
-    #    The ceiling is a harness constant; the namespacing is the spine's.
-    #    Standalone (no _lib) the lane is unavailable by design, so the
-    #    check uses an identity qualify — the assertion is about max_tokens.
+    # 6. Fireworks default ceiling clears a long reasoning run (identity qualify).
     b = fireworks_transport.to_openai_body({"model": "glm-5p3", "messages": []},
                                            qualify=lambda m: m)
     ok(b["max_tokens"] >= 22740,
@@ -372,8 +361,7 @@ def test_gate_scoring():
         (Path(td) / "report" / "count.txt").write_text("3\n")
         passed, _ = gate.score(td)
         ok(passed, "gate: exact state scores PASS")
-        # No trailing newline + faithful wc -l derivation (2) also PASSES —
-        # the positive-control bug from 2026-08-03.
+        # No trailing newline + faithful wc -l derivation (2) also PASSES.
         (Path(td) / "data.txt").write_text("alpha\nbravo\ncharlie")
         (Path(td) / "report" / "count.txt").write_text("2")
         passed, _ = gate.score(td)
@@ -381,8 +369,7 @@ def test_gate_scoring():
         (Path(td) / "report" / "count.txt").write_text("2 data.txt\n")
         passed, _ = gate.score(td)
         ok(passed, "gate: raw wc output form PASSES (chain over cosmetics)")
-        # bug bash 2026-09-27 #12 (LOW): a guessed "3" used to pass even
-        # where wc -l truly says 2.
+        # A guessed "3" fails where wc -l says 2.
         (Path(td) / "report" / "count.txt").write_text("3")
         passed, checks = gate.score(td)
         ok(not passed, "gate: a guessed 3 FAILs when wc -l says 2")
@@ -394,9 +381,7 @@ def test_gate_scoring():
 
 # ------------------------------------------------------------------ policy ---
 def test_policy():
-    # THE SEAM: loop.run with NO gate argument denies a tool nobody declared.
-    # Before 2026-09-16 this call ran the tool. Everything else in this block
-    # is detail; this one line is what closes the hole.
+    # loop.run with no gate argument denies a tool nobody declared.
     hits = []
     stray = loop.Tool("stray", "undeclared", {}, lambda a: hits.append(1) or "ran")
     transport, sent = _scripted_transport([
@@ -440,8 +425,7 @@ def test_policy():
     ok(ga("run_bash", {"command": "ls -la"})[0], "policy: BASH_ANY allows")
     ok(not ga("run_bash", {"command": "ls\nrm x"})[0],
        "policy: BASH_ANY still shape-checks")
-    # Grok review 2026-09-16: `match` was start-anchored and `\S+` swallowed
-    # metacharacters. fullmatch + shell-syntax refusal, unless opted in.
+    # Allowlist uses fullmatch and refuses shell syntax unless opted in.
     gnoanchor = policy.gate({"run_bash": policy.bash_policy([r"wc -l \S+"])})
     for cmd in ("wc -l data.txt; rm -rf /", "wc -l data.txt;id", "wc -l data.txt|bash",
                 "wc -l data.txt&&id", "wc -l $(id)", "wc -l `id`", "wc -l data.txt`id`",
@@ -473,7 +457,6 @@ def test_policy():
         ok(False, "policy: built-in table is read-only")
     except TypeError:
         ok(True, "policy: built-in table is read-only")
-    # Astra review 2026-09-16.
     ok(not policy.DEFAULT("list_dir", {"path": "\n" * 5000})[0],
        "policy: control-only path is not 'no path'")
     for p in ("harness/policy.py", "sub/_lib/mail.py", ".git/hooks/pre-commit",
@@ -529,14 +512,7 @@ def test_policy():
 
 
 def test_connector_tools_fall_through(g):
-    """A provider connector installs its predicates into _lib/policy_gate, so
-    the harness's default gate enforces them for free — nothing is added HERE.
-
-    That is the claim the connector design makes about `harness/policy.py`
-    ("nothing to add if the registry's predicates install into policy_gate"),
-    and a claim nobody checks is a claim, not a control. A local model driving
-    the harness gets exactly the bounds the tool table declares.
-    """
+    """Connector predicates installed into _lib/policy_gate are enforced by the default gate."""
     try:
         import google_connector  # noqa: F401 — the import installs the policies
     except Exception:            # noqa: BLE001 — connector absent is not a fail

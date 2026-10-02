@@ -1,12 +1,9 @@
-"""CLI:  cd ~/Github/CC && /usr/bin/python3 -m harness [options] "task"
+"""CLI:  python3 -m harness [options] "task"
 
 Modes:
   "task" --workdir DIR      run the agentic floor on a task (default mode)
   --probe MODEL             measure which dialect a model actually passes
   --selftest                offline selftest (no network)
-
-The probe is how a registry entry earns ``status: proven`` — it runs one tiny
-tool task per dialect against the live node and reports PASS/FAIL + latency.
 """
 import argparse
 import json
@@ -18,7 +15,6 @@ from . import dialects, loop, policy, registry, tools_local
 def probe(model):
     """One tiny tool task per dialect; report what the model actually does."""
     results = {}
-    # `mark` is this probe's own tool, so this probe declares its policy.
     probe_gate = policy.gate({"mark": policy.string_args(required=("token",))})
     for dia in dialects.DIALECTS:
         got = {}
@@ -105,10 +101,7 @@ def main(argv=None):
     system = ("You are a capable agent working inside the directory %s. "
               "Use the tools to complete the task, then give a short final "
               "answer stating what you did." % args.workdir)
-    # BASH_ANY is an opt-IN (`--bash-any`), not the CLI's default: there is no
-    # permission card here, so "a human typed the task" is not "a human saw
-    # each command" (Grok review 2026-09-16). Default: bash offered, denied
-    # loudly, the denial names the flag.
+    # No permission card in the CLI, so bash is denied unless --bash-any opts in.
     task_gate = (policy.gate({"run_bash": policy.bash_policy(policy.BASH_ANY)})
                  if args.bash_any and not args.no_bash else policy.DEFAULT)
 
