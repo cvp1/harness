@@ -50,6 +50,9 @@ def to_deepseek_body(payload):
 def transport(host, payload, timeout):
     """``loop.run`` transport; ``host`` is ignored (single hosted endpoint)."""
     del host
+    from _lib import provider_hold
+    if provider_hold.held("deepseek"):
+        raise ValueError("DeepSeek on hold: %s" % provider_hold.held("deepseek"))
     body = to_deepseek_body(payload)
     data = json.dumps(body).encode("utf-8")
     try:
@@ -83,7 +86,9 @@ def available():
 
 def unavailable_reason():
     """``None`` when the lane can run, else the reason phrased as the fix."""
-    from _lib import secrets
+    from _lib import provider_hold, secrets
+    if provider_hold.held("deepseek"):
+        return "on hold — " + provider_hold.held("deepseek")
     key_file = Path.home() / ".key" / "deepseek_key"
     if os.environ.get("DEEPSEEK_API_KEY"):
         return None

@@ -82,6 +82,9 @@ def transport(host, payload, timeout):
     """``loop.run`` transport; ``host`` is ignored. Returns the response verbatim."""
     del host
     body = to_openai_body(payload)
+    from _lib import provider_hold
+    if provider_hold.held(body.get("model")):
+        raise ValueError("on hold: %s" % provider_hold.held(body.get("model")))
     data = json.dumps(body).encode("utf-8")
     try:
         key = _spine()._key()
