@@ -123,7 +123,7 @@ def _first_tag(host, timeout=6):
 def _resolve_host():
     """Cheap, zero-network: _lib's node fact when present, else HARNESS_NODE."""
     if local_llm is not None:
-        return local_llm.NODES[0]["host"]
+        return local_llm.NODE_HOST
     return os.environ.get("HARNESS_NODE", "127.0.0.1")
 
 
@@ -132,7 +132,7 @@ def _resolve_model(host, model):
     if model:
         return model
     if local_llm is not None:
-        return local_llm.NODES[0]["model"]
+        return local_llm.DEFAULT_MODEL
     return os.environ.get("HARNESS_MODEL") or _first_tag(host)
 
 
